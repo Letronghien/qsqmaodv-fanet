@@ -1,51 +1,88 @@
 #!/usr/bin/env bash
-# run_jobs.sh — resume-safe parallel runner (~/qsqmaodv-fanet/ns-3-qsq).
-#   bash experiments/run_jobs.sh experiments/jobs.tsv
-#   MAX_JOBS=4 OUTDIR=data/v2 bash experiments/run_jobs.sh experiments/jobs.tsv
-# Calls the compiled binary directly (no './ns3 run' per job: faster, no lock contention).
+# run_jobs.sh — crash-safe, resumable parallel runner.
+#
+#   bash experiments/run_jobs.sh experiments/jobs_ablation.tsv
+#   MAX_JOBS=7 JOB_TIMEOUT=3600 bash experiments/run_jobs.sh <jobs.tsv>
+#
+# Durability (the VM may freeze or reboot):
+#   * every run writes ITS OWN file  data/v2/runs/<csv-name>/<job-id>.csv
+#   * written to a temporary name, fsync'ed, then atomically renamed
+#     -> a file that exists is always complete; a crash loses at most the runs in flight
+#   * "done" == the result file exists, so re-running the same command continues
+#     where it stopped (finished runs are never repeated)
+#   * each run is killed after JOB_TIMEOUT seconds; failed runs are retried once at the
+#     end of the pass and on every later invocation
+#   * a lock prevents two runners from working on the same output folder
+# Aggregated CSVs (data/v2/<csv-name>.csv) are rebuilt by tools/collect.py.
 set -u
 PROJ=$(cd "$(dirname "$0")/.." && pwd)
-JOBS=${1:-$PROJ/experiments/jobs.tsv}
+JOBS=${1:?usage: run_jobs.sh <jobs.tsv>}
 [[ -f "$PROJ/.workspace" ]] && source "$PROJ/.workspace"
-NS3=${NS3:?run tools/setup_ns3.sh first (or export NS3=~/qsqmaodv-fanet/ns-3-qsq)}
+NS3=${NS3:?run tools/setup_ns3.sh first}
 OUTDIR=${OUTDIR:-$PROJ/data/v2}
 MAX_JOBS=${MAX_JOBS:-$(( $(nproc) > 1 ? $(nproc) - 1 : 1 ))}
-DONE="$OUTDIR/done.txt"
-mkdir -p "$OUTDIR/tmp"; touch "$DONE"
+JOB_TIMEOUT=${JOB_TIMEOUT:-3600}
+RUNS="$OUTDIR/runs"; LOGS="$OUTDIR/logs"
+mkdir -p "$RUNS" "$LOGS"
 
-( cd "$NS3" && ./ns3 build qsq-compare >/dev/null ) || { echo "build failed"; exit 1; }
-BIN=$(find "$NS3/build/scratch" -maxdepth 1 -type f -executable -name "*qsq-compare*" | head -1)
-[[ -x "$BIN" ]] || { echo "binary not found under $NS3/build/scratch"; exit 1; }
-export BIN OUTDIR DONE LD_LIBRARY_PATH="$NS3/build/lib:${LD_LIBRARY_PATH:-}"
+exec 8>"$OUTDIR/.runner.lock"
+flock -n 8 || { echo "another runner is already using $OUTDIR (see: tmux ls)"; exit 1; }
 
-run_one() {
-  local jid="$1" csv="$2" args="$3"
-  local safe; safe=$(echo "$jid" | tr '|:= ' '____')
-  local tmp="$OUTDIR/tmp/$safe.csv"; rm -f "$tmp"
+if [[ -z "${BIN:-}" ]]; then
+  ( cd "$NS3" && ./ns3 build qsq-compare >/dev/null ) || { echo "build failed"; exit 1; }
+  BIN=$(find "$NS3/build/scratch" -maxdepth 1 -type f -executable -name "*qsq-compare*" | head -1)
+fi
+[[ -x "$BIN" ]] || { echo "binary not found"; exit 1; }
+export BIN RUNS LOGS JOB_TIMEOUT LD_LIBRARY_PATH="$NS3/build/lib:${LD_LIBRARY_PATH:-}"
+
+safe_id() { echo "$1" | tr '|:= /' '_____'; }
+export -f safe_id
+
+run_one() {   # $1 job id  $2 csv name  $3 args
+  local id; id=$(safe_id "$1")
+  local dir="$RUNS/${2%.csv}"; mkdir -p "$dir"
+  local final="$dir/$id.csv" tmp="$dir/.tmp_$id.csv" err="$LOGS/$id.err"
+  [[ -s "$final" ]] && return 0
+  rm -f "$tmp"
   # shellcheck disable=SC2086
-  "$BIN" $args --csvFile="$tmp" >/dev/null 2>"$OUTDIR/tmp/$safe.err"
-  if [[ -s "$tmp" ]]; then
-    ( flock -x 9
-      if [[ ! -s "$OUTDIR/$csv" ]]; then cat "$tmp" >> "$OUTDIR/$csv"; else tail -n +2 "$tmp" >> "$OUTDIR/$csv"; fi
-      echo "$jid" >> "$DONE" ) 9>"$OUTDIR/.lock"
-    rm -f "$tmp" "$OUTDIR/tmp/$safe.err"
+  timeout --kill-after=30 "$JOB_TIMEOUT" "$BIN" $3 --csvFile="$tmp" >/dev/null 2>"$err" 8>&-
+  local rc=$?
+  if [[ $rc -eq 0 && -s "$tmp" && $(wc -l < "$tmp") -ge 2 ]]; then
+    sync "$tmp" 2>/dev/null; mv -f "$tmp" "$final"; sync "$dir" 2>/dev/null
+    rm -f "$err"
   else
-    echo "FAILED $jid -> $OUTDIR/tmp/$safe.err"
+    rm -f "$tmp"
+    echo "$(date -Is) rc=$rc $1" >> "$LOGS/failed.txt"
+    return 1
   fi
 }
 export -f run_one
 
-total=$(wc -l < "$JOBS")
-grep -vxFf "$DONE" <(cut -f1 "$JOBS") > "$OUTDIR/todo_ids.txt" || true
-todo=$(wc -l < "$OUTDIR/todo_ids.txt")
-echo "binary : $BIN"
-echo "jobs   : $total total, $todo to run, $MAX_JOBS in parallel -> $OUTDIR"
-n=0; start=$(date +%s)
-while IFS=$'\t' read -r jid csv args; do
-  while (( $(jobs -rp | wc -l) >= MAX_JOBS )); do sleep 0.2; done
-  run_one "$jid" "$csv" "$args" &
-  n=$((n+1))
-  if (( n % 50 == 0 )); then el=$(( $(date +%s) - start )); echo "  launched $n/$todo  (${el}s elapsed)"; fi
-done < <(awk -F'\t' 'NR==FNR{t[$1]=1;next} ($1 in t)' "$OUTDIR/todo_ids.txt" "$JOBS")
-wait
-echo "done: $(grep -cxFf <(cut -f1 "$JOBS") "$DONE") / $total"
+pending() {  # list job lines whose result file does not exist yet
+  while IFS=$'\t' read -r jid csv args; do
+    [[ -s "$RUNS/${csv%.csv}/$(safe_id "$jid").csv" ]] || printf '%s\t%s\t%s\n' "$jid" "$csv" "$args"
+  done < "$JOBS"
+}
+
+run_pass() {
+  local todo; todo=$(pending)
+  local n; n=$(printf '%s' "$todo" | grep -c . || true)
+  echo "$(date '+%F %T')  $(basename "$JOBS"): $n to run ($MAX_JOBS parallel, timeout ${JOB_TIMEOUT}s)"
+  [[ $n -eq 0 ]] && return 0
+  local k=0
+  while IFS=$'\t' read -r jid csv args; do
+    while (( $(jobs -rp | wc -l) >= MAX_JOBS )); do wait -n 2>/dev/null || sleep 0.2; done
+    run_one "$jid" "$csv" "$args" &
+    k=$((k + 1))
+    (( k % 100 == 0 )) && echo "$(date '+%F %T')    launched $k/$n"
+  done <<< "$todo"
+  wait
+}
+
+run_pass
+left=$(pending | grep -c . || true)
+if (( left > 0 )); then echo "retrying $left failed run(s) once"; run_pass; fi
+left=$(pending | grep -c . || true)
+total=$(grep -c . "$JOBS")
+echo "$(date '+%F %T')  $(basename "$JOBS"): $((total - left))/$total done, $left failed (see $LOGS)"
+exit 0

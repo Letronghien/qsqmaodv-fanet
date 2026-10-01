@@ -17,7 +17,10 @@ help:
 	@echo "make ablation     - 2x2 factorial ablation (420 runs)  -> decides the paper storyline"
 	@echo "make main         - main families N/L/S/C x 4 protocols (2760 runs)"
 	@echo "make realism sens - multi-hop scenario / sensitivity sweeps"
-	@echo "make analyze      - statistics + tables into $(REPORT)"
+	@echo "make analyze      - collect per-run files + statistics + tables into $(REPORT)"
+	@echo "make run SETS=\"ablation main sens realism\"  - long queue inside tmux session 'qsq'"
+	@echo "make resume       - restart the stored queue after a freeze/reboot (finished runs kept)"
+	@echo "make attach / progress / autoresume (start queue automatically after reboot)"
 	@echo "make legacy       - re-analysis of the old ns-3.40 CSVs (data/legacy_v1)"
 	@echo "Variables: PROTOS=AODV,QS2MAODV (if baselines are missing)  MAXJ=4  DATA=... REPORT=..."
 
@@ -35,6 +38,7 @@ build:
 define RUNSET
 	$(PY) $(JOBSDIR)/make_jobs.py --sets $(1) --protocols $(PROTOS) --out $(JOBSDIR)/jobs_$(1).tsv
 	OUTDIR=$(DATA) MAX_JOBS=$(MAXJ) bash $(JOBSDIR)/run_jobs.sh $(JOBSDIR)/jobs_$(1).tsv
+	$(PY) tools/collect.py $(DATA)
 endef
 smoke:
 	$(call RUNSET,smoke)
@@ -52,8 +56,24 @@ sens:
 	$(call RUNSET,sens)
 
 analyze:
+	$(PY) tools/collect.py $(DATA)
 	$(PY) analysis/analyze.py --dir $(DATA) --out $(REPORT)
+
+# ---- long runs: tmux + resumable queue (survives SSH loss; resume after VM freeze) ----
+SETS ?= ablation main sens realism
+run:
+	@OUTDIR=$(DATA) PROTOS=$(PROTOS) bash tools/run_tmux.sh $(SETS)
+resume:
+	@OUTDIR=$(DATA) PROTOS=$(PROTOS) bash tools/run_tmux.sh
+attach:
+	@tmux attach -t qsq
+progress:
+	@OUTDIR=$(DATA) bash tools/progress.sh
+collect:
+	@$(PY) tools/collect.py $(DATA)
+autoresume:
+	@bash tools/install_autoresume.sh
 legacy:
 	$(PY) analysis/reanalyze_v1.py data/legacy_v1
 
-.PHONY: help env status baselines setup build smoke sanity ablation main realism sens analyze legacy
+.PHONY: run resume attach progress collect autoresume help env status baselines setup build smoke sanity ablation main realism sens analyze legacy
