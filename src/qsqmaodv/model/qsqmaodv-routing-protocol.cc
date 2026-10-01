@@ -24,6 +24,13 @@
  * Authors: Elena Buchatskaia <borovkovaes@iitp.ru>
  *          Pavel Boyko <boyko@iitp.ru>
  */
+// QS: templates that use NS_LOG must be included before NS_LOG_APPEND_CONTEXT
+#include "ns3/wifi-mac.h"
+#include "ns3/wifi-mac-queue.h"
+#include "ns3/wifi-mac-queue-container.h"
+#include "ns3/arp-cache.h"
+#include "ns3/mac48-address.h"
+
 #define NS_LOG_APPEND_CONTEXT                                                                      \
     if (m_ipv4)                                                                                    \
     {                                                                                              \
@@ -48,11 +55,6 @@
 #include "ns3/udp-socket-factory.h"
 #include "ns3/wifi-mpdu.h"
 #include "ns3/wifi-net-device.h"
-#include "ns3/wifi-mac.h"
-#include "ns3/wifi-mac-queue.h"
-#include "ns3/wifi-mac-queue-container.h"
-#include "ns3/arp-cache.h"
-#include "ns3/mac48-address.h"
 
 #include <algorithm>
 #include <limits>

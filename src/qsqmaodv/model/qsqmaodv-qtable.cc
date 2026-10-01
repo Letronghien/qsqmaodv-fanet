@@ -179,6 +179,29 @@ QTable::ComputeReward(double ackSuccess, double delaySec, double energyFrac) con
     return r;
 }
 
+// QS-QMAODV reward:
+//   r = s·(w1·ACK + w2·D) + w3·E + wq_eff·ACK·(1 − q_n) − P·(1 − ACK)
+//   s = (w1 + w2 − wq_eff)/(w1 + w2)  keeps the maximum reward unchanged.
+// With wq = 0 and P = 0 this is exactly ComputeReward (same operations, same order).
+double
+QTable::ComputeRewardQs(double ackSuccess, double delaySec, double energyFrac, double qn) const
+{
+    if (delaySec < 0.0) delaySec = 0.0;
+    qn = std::min(1.0, std::max(0.0, qn));
+    double wqEff = m_qs.wq;
+    if (m_qs.adaptiveWq && m_qs.wq > 0.0)
+        wqEff = std::min(m_qs.wqMax, m_qs.wq + m_qs.wqKappa * qn);
+    double base = m_w1 * ackSuccess
+                + m_w2 * ((m_delayRef > 0.0) ? 1.0 / (1.0 + delaySec / m_delayRef)
+                                             : 1.0 / (delaySec + 1.0));
+    if (wqEff > 0.0 && (m_w1 + m_w2) > 0.0)
+        base *= (m_w1 + m_w2 - wqEff) / (m_w1 + m_w2);
+    double r = base + m_w3 * energyFrac;
+    if (wqEff > 0.0) r += wqEff * ackSuccess * (1.0 - qn);
+    if (m_qs.failPenalty > 0.0 && ackSuccess < 0.5) r -= m_qs.failPenalty;
+    return r;
+}
+
 // ============================================================================
 // Standard Q-table operations (same as QSQMAODV)
 // ============================================================================
