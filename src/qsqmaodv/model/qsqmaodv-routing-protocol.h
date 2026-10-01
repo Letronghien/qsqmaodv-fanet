@@ -366,7 +366,7 @@ class RoutingProtocol : public Ipv4RoutingProtocol
   uint32_t m_qsTrendWindow{3};
   double m_qsTrendBump{0.10};
   double m_qsTrendCap{0.50};
-  double m_qsNhQueueRef{0.0};     ///< packets; 0 = MAC queue MaxSize
+  double m_qsNhQueueRef{20.0};    ///< QueueRefPackets: packets that count as q = 1
   EventId m_qsDecayEvent;
   EventId m_qsTrendEvent;
   std::deque<double> m_qsTrendHist;

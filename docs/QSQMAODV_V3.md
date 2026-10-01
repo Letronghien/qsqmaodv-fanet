@@ -19,8 +19,12 @@ With every extension switched off, QSQMAODV runs the same code path as QMAODV
 | T — trend exploration | `TrendEpsilon` (true), `TrendInterval` (1 s), `TrendDelta` (0.05), `TrendWindow` (3), `TrendBump` (0.10), `TrendCap` (0.50) | ε rises when the node's MAC occupancy grows in 3 consecutive samples |
 | P — failure penalty | `FailurePenalty` (0.5) | MAC drop is punished (QMAODV gives a drop the delay term only) |
 
-q_n = |Q_BE(n)| / Q_max,BE: frames waiting in the node's best-effort MAC queue whose receiver
-is next hop n (read-only, `MakeWifiUnicastQueueId`; AC_BE_NQOS on the non-QoS 802.11b MAC).
+q_n = min(1, |Q_BE(n)| / Q_ref): frames waiting in the node's best-effort MAC queue whose receiver
+is next hop n, normalised by `QueueRefPackets` (default 20 packets; the node occupancy used by the
+trend detector uses the same reference). Normalising by the MAC queue capacity (500 packets in ns-3)
+made q_n ≈ 0.001 on average in the first sanity runs, i.e. the queue terms had no effect; Q_ref is
+therefore a tuned parameter and is reported in the sensitivity study (5, 10, 20, 50, 500 packets).
+q_n is read (read-only, `MakeWifiUnicastQueueId`; AC_BE_NQOS on the non-QoS 802.11b MAC).
 q_n is recorded when the next hop is chosen and carried to the MAC-feedback update in the
 packet tag, so the reward refers to the queue state the agent actually saw.
 

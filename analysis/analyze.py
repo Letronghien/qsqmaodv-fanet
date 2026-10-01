@@ -95,7 +95,12 @@ def sanity(d, out, v1dir):
                      f"  -> 0 means identical mobility for all protocols (paired tests valid)")
         lines.append(f"[connectivity] mean degree @250/500/1000 m: "
                      f"{m.Deg250.mean():.2f} / {m.Deg500.mean():.2f} / {m.Deg1000.mean():.2f}")
-    open(os.path.join(out, "sanity.txt"), "w").write("\n".join(lines) + "\n")
+    if df is not None and len(full) and "MeanNhQ" in full:
+        lines.append(f"[QSQ full] trend bumps per run: {full.QsTrendBumps.mean():.1f}  "
+                     f"(0 means the trend detector never fired)")
+    path = os.path.join(out, "sanity.txt")
+    open(path, "w").write("\n".join(lines) + "\n")
+    lines.append(f"(saved to {os.path.abspath(path)})")
     print("\n".join(lines))
 
 # ------------------------------------------------------------------------------------------

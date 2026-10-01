@@ -473,9 +473,11 @@ RoutingProtocol::GetTypeId()
         .AddAttribute("TrendCap", "QS: epsilon ceiling for trend bumps",
                       DoubleValue(0.50), MakeDoubleAccessor(&RoutingProtocol::m_qsTrendCap),
                       MakeDoubleChecker<double>(0.0, 1.0))
-        .AddAttribute("NextHopQueueRef",
-                      "QS: reference length (packets) for q_n; 0 = MAC queue MaxSize",
-                      DoubleValue(0.0), MakeDoubleAccessor(&RoutingProtocol::m_qsNhQueueRef),
+        .AddAttribute("QueueRefPackets",
+                      "QS: queue length (packets) that counts as 'full' (q = 1) for both the "
+                      "next-hop occupancy q_n and the node occupancy used by the trend detector; "
+                      "0 = MAC queue MaxSize (500 by default, which makes q almost always ~0)",
+                      DoubleValue(20.0), MakeDoubleAccessor(&RoutingProtocol::m_qsNhQueueRef),
                       MakeDoubleChecker<double>(0.0))
         .AddAttribute("HelloInterval",
                           "HELLO messages emission interval.",
@@ -2898,8 +2900,10 @@ double
 RoutingProtocol::GetNodeQueueOccupancy() const
 {
     Ptr<WifiMacQueue> q = GetBeQueue();
-    if (!q || q->GetMaxSize().GetValue() == 0) return 0.0;
-    return std::min(1.0, static_cast<double>(q->GetNPackets()) / q->GetMaxSize().GetValue());
+    if (!q) return 0.0;
+    double ref = (m_qsNhQueueRef > 0.0) ? m_qsNhQueueRef
+                                        : static_cast<double>(q->GetMaxSize().GetValue());
+    return (ref > 0.0) ? std::min(1.0, q->GetNPackets() / ref) : 0.0;
 }
 
 double

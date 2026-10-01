@@ -96,6 +96,8 @@ def jobs():
         add("sens", "v2_sens.csv", f"thr:{t}", f"{p} {A(AckSilenceThreshold=f'{t}s')}")
     for d in (0.85, 0.90, 0.92, 0.95, 0.99):
         add("sens", "v2_sens.csv", f"decay:{d}", f"{p} {A(DecayFactor=d)}")
+    for r in (5, 10, 20, 50, 0):          # 0 = MAC queue MaxSize (500)
+        add("sens", "v2_sens.csv", f"qref:{r}", f"{p} {A(QueueRefPackets=r)}")
     for g in (0.0, 0.5, 0.9):
         add("sens", "v2_sens.csv", f"gamma:{g}", f"{p} --qmGamma={g}")
     return J
