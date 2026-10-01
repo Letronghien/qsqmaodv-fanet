@@ -67,16 +67,25 @@ def sanity(d, out, v1dir):
     lines = []
     df = load(d, "v2_sanity.csv")
     if df is not None:
-        v2 = df[df.Tag == "v2default"]
-        lines.append(f"[v2 default] FbExpired share = {v2.FbExpired.sum() / max(1, v2.FbAck.sum()+v2.FbDrop.sum()+v2.FbExpired.sum()):.3f}")
-        lines.append(f"[v2 default] MeanMacQt={v2.MeanMacQt.mean():.4f}  FracMacQtPos={v2.FracMacQtPos.mean():.3f}"
-                     f"  MaxMacQt={v2.MaxMacQt.max():.3f}  FbAck={v2.FbAck.sum():.0f}  FbDrop={v2.FbDrop.sum():.0f}"
-                     f"  FbExpired={v2.FbExpired.sum():.0f}")
-        lines.append("   -> FracMacQtPos must be > 0 (in v1 it was exactly 0); FbAck must be > 0.")
-        v1 = df[df.Tag == "v1switches"]
-        if len(v1):
-            lines.append(f"[v1 switches] MeanMacQt={v1.MeanMacQt.mean():.4f} (must be 0)  PDR={100*v1.PDR.mean():.2f} %"
-                         f"  vs v2 default PDR={100*v2.PDR.mean():.2f} %")
+        qm = df[df.Tag == "qmaodv"].set_index("Seed")
+        off = df[df.Tag == "qsq_off"].set_index("Seed")
+        full = df[df.Tag == "qsq_full"]
+        for s in sorted(set(qm.index) & set(off.index)):
+            same = all(qm.loc[s, k] == off.loc[s, k] for k in ("RxPkts", "TxPkts", "CtrlPktsAll"))
+            lines.append(f"[equivalence] seed {s}: QMAODV RxPkts={qm.loc[s,'RxPkts']} "
+                         f"QSQMAODV(all off) RxPkts={off.loc[s,'RxPkts']} -> {'IDENTICAL' if same else 'DIFFERENT'}")
+        lines.append("   -> must be IDENTICAL: QS-QMAODV with every extension off is QMAODV.")
+        if len(full):
+            lines.append(f"[QSQ full] node MAC occupancy: mean={full.MeanMacQt.mean():.4f} "
+                         f"frac>0={full.FracMacQtPos.mean():.3f} max={full.MaxMacQt.max():.3f}")
+            if "MeanNhQ" in full:
+                lines.append(f"[QSQ full] next-hop occupancy q_n: mean={full.MeanNhQ.mean():.4f} "
+                             f"frac>0={full.FracNhQPos.mean():.3f}")
+            lines.append(f"[QSQ full] MAC feedback ACK={full.FbAck.sum():.0f} drop={full.FbDrop.sum():.0f}"
+                         + (f"  decayed={full.QsDecayed.sum():.0f} trendBumps={full.QsTrendBumps.sum():.0f}"
+                            if "QsDecayed" in full else ""))
+            lines.append(f"[PDR] QMAODV={100*qm.PDR.mean():.2f} %  QSQ-off={100*off.PDR.mean():.2f} %  "
+                         f"QSQ-full={100*full.PDR.mean():.2f} %  (3 seeds: not a result)")
     # pairing check on main families
     m = load(d, "v2_family_*.csv")
     if m is not None and "TopoFingerprint" in m:
@@ -97,7 +106,7 @@ def main_families(d, out):
     m["fam"] = m.cond.str[0]
     rows = []
     for (fam, cond), g in m.groupby(["fam", "cond"], sort=False):
-        qs = g.Protocol == "QS2MAODV"
+        qs = g.Protocol == "QSQMAODV"
         for base in ("QMAODV", "PMAODV", "AODV"):
             bs = g.Protocol == base
             for met, (lab, sc) in METRICS.items():
@@ -135,11 +144,12 @@ def ablation(d, out):
     a = load(d, "v2_ablation.csv")
     if a is None: print("[ablation] no data"); return
     a["scen"] = a.Tag.str.split("|").str[0]; a["var"] = a.Tag.str.split("|").str[1]
-    rows, md = [], ["# Factorial ablation: Q = MAC-queue information, D = ACK-silence decay\n"]
+    rows, md = [], ["# Factorial ablation: Q = queue information (reward + selection + trend), D = ACK-silence decay\n"]
     for scen, g in a.groupby("scen"):
         piv = {v: g[g["var"] == v].set_index("Seed") for v in g["var"].unique()}
         md.append(f"\n## Scenario {scen}\n\n| Variant | PDR (%) | Delay pw (ms) | Overhead NRLall (%) |\n|---|---|---|---|")
-        for v in ("AODV", "V1", "CORE", "Q0D0", "Q1D0", "Q0D1", "Q1D1"):
+        for v in ("AODV", "QMAODV", "OFF", "Q0D0", "Q1D0", "Q0D1", "Q1D1",
+                  "FULL-R", "FULL-S", "FULL-T", "FULL-P"):
             if v in piv:
                 p = piv[v]
                 md.append(f"| {v} | {100*p.PDR.mean():.2f} ± {100*p.PDR.std():.2f} | "
@@ -160,6 +170,21 @@ def ablation(d, out):
                 p = wilcox(e, np.zeros_like(e))
                 rows.append(dict(Scenario=scen, Metric=met, Effect=name, estimate=e.mean(), ci_lo=lo, ci_hi=hi, p=p, n=len(e)))
                 md.append(f"| {met} | {name} | {e.mean():+.2f} [{lo:+.2f}, {hi:+.2f}] | {p:.4f} |")
+        # leave-one-out: FULL (= Q1D1) minus one component, paired by seed
+        if "Q1D1" in piv:
+            md.append("\n| Removed from FULL | dPDR (pp) [95% CI] | p | dDelay (ms) | p |\n|---|---|---|---|---|")
+            loo = {"FULL-R": "queue reward", "FULL-S": "queue-aware selection", "FULL-T": "trend epsilon",
+                   "FULL-P": "failure penalty", "Q1D0": "ACK-silence decay", "QMAODV": "everything (QMAODV)"}
+            for v, lab in loo.items():
+                if v not in piv: continue
+                sd = sorted(set(piv[v].index) & set(piv["Q1D1"].index))
+                dp = (piv[v].loc[sd, "PDR"].values - piv["Q1D1"].loc[sd, "PDR"].values) * 100
+                dd = piv[v].loc[sd, "DelayPw_ms"].values - piv["Q1D1"].loc[sd, "DelayPw_ms"].values
+                lo, hi = boot_ci(dp)
+                md.append(f"| {lab} | {dp.mean():+.2f} [{lo:+.2f}, {hi:+.2f}] | {wilcox(dp, np.zeros_like(dp)):.4f} | "
+                          f"{dd.mean():+.1f} | {wilcox(dd, np.zeros_like(dd)):.4f} |")
+                rows.append(dict(Scenario=scen, Metric="PDR", Effect=f"LOO {lab}", estimate=dp.mean(),
+                                 ci_lo=lo, ci_hi=hi, p=wilcox(dp, np.zeros_like(dp)), n=len(dp)))
     pd.DataFrame(rows).to_csv(os.path.join(out, "ablation_factorial.csv"), index=False, float_format="%.4f")
     open(os.path.join(out, "ablation_factorial.md"), "w").write("\n".join(md))
     print("[ablation] -> ablation_factorial.csv/.md")

@@ -49,6 +49,8 @@
 #endif
 #include "ns3/qs2maodv-helper.h"
 #include "ns3/qs2maodv-routing-protocol.h"
+#include "ns3/qsqmaodv-helper.h"
+#include "ns3/qsqmaodv-routing-protocol.h"
 #include <iostream>
 #include <fstream>
 #include <iomanip>
@@ -157,6 +159,7 @@ main(int argc, char* argv[])
     std::string ctrlPorts = "654,655";  // UDP ports of routing control messages
     std::string qmAttr;            // extra QMAODV attributes "Name=Value;..."
     std::string pmAttr;            // extra PMAODV attributes "Name=Value;..."
+    std::string qsqAttr;           // extra QSQMAODV attributes "Name=Value;..." (ablation)
     std::string baselineCfg;       // effective baseline configuration (CSV)
   double ackSilenceThreshold = 15.0;  // W2 sweep: ACK-silence threshold (s)
   double decayFactor         = 0.92;  // W3 sweep: Q-value decay multiplier
@@ -214,6 +217,7 @@ main(int argc, char* argv[])
     cmd.AddValue("qmW2",           "QMAODV reward w2 (delay)",             qmW2);
     cmd.AddValue("ctrlPorts",      "routing control UDP ports, comma list", ctrlPorts);
     cmd.AddValue("qmAttr",         "extra QMAODV attributes Name=Value;...", qmAttr);
+    cmd.AddValue("qsqAttr",        "extra QSQMAODV attributes Name=Value;...", qsqAttr);
     cmd.AddValue("pmAttr",         "extra PMAODV attributes Name=Value;...", pmAttr);
     cmd.AddValue("qsAlpha",        "QS2MAODV learning rate",               qsAlpha);
     cmd.AddValue("qsGamma",        "QS2MAODV discount factor",             qsGamma);
@@ -334,7 +338,19 @@ main(int argc, char* argv[])
 #else
         NS_FATAL_ERROR("QMAODV module not found: import it: bash tools/import_baselines.sh && make setup");
 #endif
-    } else if (protocol == "QS2MAODV") {
+    } else if (protocol == "QSQMAODV") {
+        // QS-QMAODV v3 = QMAODV (identical base parameters) + queue-state extensions.
+        QsqmaodvHelper qsq;
+        const std::string T = "ns3::qsqmaodv::RoutingProtocol";
+        SetChecked(qsq, T, "MaxPaths", UintegerValue(maxPaths), baselineCfg);
+        SetChecked(qsq, T, "Alpha0",   DoubleValue(qmAlpha),    baselineCfg);
+        SetChecked(qsq, T, "Gamma",    DoubleValue(qmGamma),    baselineCfg);
+        SetChecked(qsq, T, "Epsilon0", DoubleValue(qmEpsilon),  baselineCfg);
+        SetChecked(qsq, T, "RewardW1", DoubleValue(qmW1),       baselineCfg);
+        SetChecked(qsq, T, "RewardW2", DoubleValue(qmW2),       baselineCfg);
+        SetPassThrough(qsq, T, qsqAttr, baselineCfg);
+        internet.SetRoutingHelper(qsq);
+    } else if (protocol == "QS2MAODV") {      // legacy v2 (source-only), kept for reference
         Qs2maodvHelper qs2maodv;
         qs2maodv.Set("MaxPaths",      UintegerValue(maxPaths));
         qs2maodv.Set("Alpha",         DoubleValue(qsAlpha));
@@ -360,7 +376,7 @@ main(int argc, char* argv[])
         internet.SetRoutingHelper(qs2maodv);
     } else {
         NS_FATAL_ERROR("Unknown protocol: " << protocol
-                       << ". Use AODV, PMAODV, QMAODV, or QS2MAODV.");
+                       << ". Use AODV, PMAODV, QMAODV, QSQMAODV (or legacy QS2MAODV).");
     }
     internet.Install(nodes);
 
@@ -534,6 +550,22 @@ main(int argc, char* argv[])
         routeSum += s.routeSum; macMax = std::max(macMax, s.macMax);
         fbAck += s.fbAck; fbDrop += s.fbDrop; fbExp += s.fbExpired;
     }
+    // QS-QMAODV v3 diagnostics (same columns; q_n columns are new)
+    double nhQSum = 0, nhQPos = 0, qsDecayed = 0, qsTrend = 0;
+    for (uint32_t i = 0; i < nodes.GetN(); ++i)
+    {
+        Ptr<qsqmaodv::RoutingProtocol> rq = DynamicCast<qsqmaodv::RoutingProtocol>(
+            nodes.Get(i)->GetObject<Ipv4>()->GetRoutingProtocol());
+        if (!rq) continue;
+        const auto& s = rq->GetQsStats();
+        qSamples += s.decisions; macSum += s.nodeQSum; macPos += s.nodeQPos;
+        macMax = std::max(macMax, s.nodeQMax);
+        nhQSum += s.nhQSum; nhQPos += s.nhQPos;
+        fbAck += s.fbAck; fbDrop += s.fbDrop;
+        qsDecayed += s.decayed; qsTrend += s.trendBumps;
+    }
+    double meanNhQ  = qSamples > 0 ? nhQSum / qSamples : 0;
+    double fracNhQ  = qSamples > 0 ? nhQPos / qSamples : 0;
     double meanMacQt   = qSamples > 0 ? macSum / qSamples : 0;
     double fracMacPos  = qSamples > 0 ? macPos / qSamples : 0;
     double meanRouteQt = qSamples > 0 ? routeSum / qSamples : 0;
@@ -580,7 +612,7 @@ main(int argc, char* argv[])
                "MacQueueSignal,MacFeedback,NextHopQueue,QueueState,QueueEps,HybridSelect,DecayPosOnly,DelayScale,"
                "DelayPw_ms,MeanMacQt,FracMacQtPos,MaxMacQt,MeanRouteQt,FbAck,FbDrop,FbExpired,"
                "Deg250,Deg500,Deg1000,TopoFingerprint,BaselineCfg,"
-               "CtrlPktsAll,CtrlBytesAll,NRLall,NRLpkt\n";
+               "CtrlPktsAll,CtrlBytesAll,NRLall,NRLpkt,MeanNhQ,FracNhQPos,QsDecayed,QsTrendBumps\n";
     ofs << std::fixed << std::setprecision(6)
         << protocol      << "," << seed         << "," << numNodes     << ","
         << flows.size()  << "," << maxPaths      << "," << initialEnergy << ","
@@ -599,7 +631,8 @@ main(int argc, char* argv[])
         << meanRouteQt << "," << (uint64_t)fbAck << "," << (uint64_t)fbDrop << "," << (uint64_t)fbExp << ","
         << deg250 << "," << deg500 << "," << deg1k << "," << topoFp << ","
         << (baselineCfg.empty() ? "-" : baselineCfg) << ","
-        << g_ctrlPktsAll << "," << g_ctrlBytesAll << "," << nrlAll << "," << nrlPkt << "\n";
+        << g_ctrlPktsAll << "," << g_ctrlBytesAll << "," << nrlAll << "," << nrlPkt << ","
+        << meanNhQ << "," << fracNhQ << "," << (uint64_t)qsDecayed << "," << (uint64_t)qsTrend << "\n";
     ofs.close();
 
     Simulator::Destroy();

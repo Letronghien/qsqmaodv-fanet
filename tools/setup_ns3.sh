@@ -88,4 +88,5 @@ check_attrs() {   # $1 = TypeId, rest = attribute names
 }
 check_attrs ns3::qmaodv::RoutingProtocol MaxPaths Alpha0 Gamma Epsilon0 RewardW1 RewardW2
 check_attrs ns3::pmaodv::RoutingProtocol MaxPaths Beta Lambda SelMode
+check_attrs ns3::qsqmaodv::RoutingProtocol MaxPaths Alpha0 Gamma Epsilon0 RewardW1 RewardW2 QueueRewardWeight FailurePenalty QueueAwareSelect AckSilenceDecay TrendEpsilon
 echo; echo "Done. Next:  cd $REPO && make smoke"

@@ -4,7 +4,7 @@ JOBSDIR := experiments
 DATA    ?= data/v2
 REPORT  ?= reports/v2
 MAXJ    ?= $(shell n=$$(nproc); echo $$((n>1?n-1:1)))
-PROTOS  ?= AODV,PMAODV,QMAODV,QS2MAODV
+PROTOS  ?= AODV,PMAODV,QMAODV,QSQMAODV
 
 help:
 	@echo "make env          - print machine / ns-3 information (send this to the assistant)"
@@ -38,7 +38,7 @@ define RUNSET
 endef
 smoke:
 	$(call RUNSET,smoke)
-	@$(PY) -c "import pandas as pd; d=pd.read_csv('$(DATA)/smoke.csv'); c=[x for x in ['Protocol','PDR','DelayPw_ms','RxPkts','CtrlPktsAll','NRLall','FracMacQtPos','FbAck','BaselineCfg'] if x in d]; print(d[c].to_string(index=False))"
+	@$(PY) -c "import pandas as pd; d=pd.read_csv('$(DATA)/smoke.csv'); c=[x for x in ['Protocol','PDR','DelayPw_ms','RxPkts','CtrlPktsAll','NRLall','FracMacQtPos','MeanNhQ','FbAck'] if x in d]; print(d[c].to_string(index=False))"
 sanity:
 	$(call RUNSET,sanity)
 	@$(MAKE) --no-print-directory analyze

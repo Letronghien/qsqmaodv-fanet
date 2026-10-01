@@ -1,29 +1,37 @@
 #!/usr/bin/env python3
 """
-make_jobs.py — generate the job list for the JADS revision experiments (ns-3.48).
+make_jobs.py — experiment design for the JADS revision (ns-3.48, QS-QMAODV v3).
 
-Output: jobs.tsv with columns  job_id <TAB> csv_name <TAB> qsq-compare arguments
-Run them with:  bash experiments/run_jobs.sh experiments/jobs.tsv
-Every job writes ALL parameters into its CSV row (no more row-order reconstruction).
+QS-QMAODV v3 (protocol QSQMAODV) = QMAODV as published (hop-by-hop Q-learning,
+MAC-ACK/delay reward) + queue-state extensions. Every extension is an attribute;
+all off must reproduce QMAODV exactly (checked in the 'sanity' set).
 
-Experiment sets (select with --sets, default = all):
-  smoke    : 20-s runs of every protocol (build/installation check, ~1 min)
-  sanity   : 3-seed checks (MAC signal non-zero, MAC feedback active, v1-switch variant)
-  ablation : 2x2 factorial  MAC-queue information (Q) x ACK-silence decay (D)
-             + all-features-off core and legacy-v1 reference, 2 scenarios, 30 seeds
-  main     : families N, L, S, C  x  AODV, PMAODV, QMAODV, QS2MAODV(v2), 30 seeds
-  realism  : multi-hop variant (300 m radio range, 11 Mbps broadcasts), convergecast
-             and 5 random pairs, N in {20,30,40}
-  sens     : gamma, w3 (adaptive OFF so w3 is really w3), threshold, decay factor
+Output: jobs_<set>.tsv  (job_id <TAB> csv_name <TAB> qsq-compare arguments)
+Sets:
+  smoke    20-s run of every protocol
+  sanity   (a) QSQMAODV all-off == QMAODV (bit-identical), (b) queue signal active
+  ablation 2x2 factorial  Q (queue information: reward + selection + trend) x D (decay)
+           + leave-one-out from FULL + references, 2 scenarios x 30 seeds
+  main     families N, L, S, C x {AODV, PMAODV, QMAODV, QSQMAODV} x 30 seeds
+  realism  multi-hop variant (300 m range, 11 Mbps broadcasts), convergecast / 5 random pairs
+  sens     wq, beta, decay threshold, decay factor, gamma
 """
 import argparse, itertools
+from collections import Counter
 
 SEEDS = range(1, 31)
-PROTOS = ["AODV", "PMAODV", "QMAODV", "QS2MAODV"]
+PROTOS = ["AODV", "PMAODV", "QMAODV", "QSQMAODV"]
 BASE = "--simTime=200 --energy=0"
-V1_SWITCHES = "--macQueueSignal=0 --macFeedback=0 --nextHopQueue=0 --decayPosOnly=0"
-CORE_OFF = ("--macQueueSignal=0 --nextHopQueue=0 --qsW3=0 --adaptiveW3=0 --trendEps=0 "
-            "--queueEps=0 --queueState=0 --hybridSelect=0 --enableDecay=0")
+
+def A(**kw):
+    """build a --qsqAttr string"""
+    def v(x): return ("true" if x else "false") if isinstance(x, bool) else str(x)
+    return '--qsqAttr=' + ";".join(f"{k}={v(x)}" for k, x in kw.items())
+
+OFF = dict(QueueRewardWeight=0, FailurePenalty=0, QueueAwareSelect=False,
+           AckSilenceDecay=False, TrendEpsilon=False)
+Q_ON = dict(QueueRewardWeight=0.1, AdaptiveQueueWeight=True, QueueAwareSelect=True, TrendEpsilon=True)
+Q_OFF = dict(QueueRewardWeight=0, QueueAwareSelect=False, TrendEpsilon=False)
 
 def jobs():
     J = []
@@ -31,30 +39,33 @@ def jobs():
         for s in seeds:
             J.append((f"{set_}|{tag}|s{s}", csv, f"{BASE} --seed={s} --tag={tag} {args}"))
 
-    # ---------------- sanity ----------------
-    add("sanity", "v2_sanity.csv", "v2default",
-        "--protocol=QS2MAODV --numNodes=20 --pktInterval=0.10 --meanVelMin=5 --meanVelMax=5", [1, 2, 3])
-    # v1 behaviour under ns-3.48 (numbers will NOT equal the old ns-3.40 CSVs: different simulator version)
-    add("sanity", "v2_sanity.csv", "v1switches",
-        f"--protocol=QS2MAODV --numNodes=20 --pktInterval=0.10 --meanVelMin=5 --meanVelMax=5 "
-        f"--ackSilenceThreshold=15 --decayFactor=0.92 {V1_SWITCHES}", [1, 2, 3])
+    # ---- smoke ----
     for pr in PROTOS:
         J.append((f"smoke|{pr}|s1", "smoke.csv",
                   f"--simTime=20 --energy=0 --seed=1 --tag=smoke --protocol={pr} --numNodes=10 --pktInterval=0.25"))
 
-    # ---------------- factorial ablation ----------------
+    # ---- sanity ----
+    ref = "--numNodes=20 --pktInterval=0.10 --meanVelMin=5 --meanVelMax=5"
+    add("sanity", "v2_sanity.csv", "qmaodv", f"--protocol=QMAODV {ref}", [1, 2, 3])
+    add("sanity", "v2_sanity.csv", "qsq_off", f"--protocol=QSQMAODV {ref} {A(**OFF)}", [1, 2, 3])
+    add("sanity", "v2_sanity.csv", "qsq_full", f"--protocol=QSQMAODV {ref}", [1, 2, 3])
+
+    # ---- ablation ----
     scen = {"A_N20_pi010": "--numNodes=20 --pktInterval=0.10 --meanVelMin=5 --meanVelMax=5",
             "B_N40_pi025": "--numNodes=40 --pktInterval=0.25 --meanVelMin=5 --meanVelMax=5"}
     for sname, sargs in scen.items():
-        p = f"--protocol=QS2MAODV {sargs}"
+        p = f"--protocol=QSQMAODV {sargs}"
         for q, d in itertools.product([0, 1], [0, 1]):
-            qa = "--macQueueSignal=1 --nextHopQueue=1" if q else "--macQueueSignal=0 --nextHopQueue=0"
-            add("ablation", "v2_ablation.csv", f"{sname}|Q{q}D{d}", f"{p} {qa} --enableDecay={d}")
-        add("ablation", "v2_ablation.csv", f"{sname}|CORE", f"{p} {CORE_OFF}")
-        add("ablation", "v2_ablation.csv", f"{sname}|V1", f"{p} {V1_SWITCHES}")
-        add("ablation", "v2_ablation.csv", f"{sname}|AODV", sargs.replace("--numNodes", "--protocol=AODV --numNodes"))
+            attrs = dict(Q_ON if q else Q_OFF, AckSilenceDecay=bool(d), FailurePenalty=0.5)
+            add("ablation", "v2_ablation.csv", f"{sname}|Q{q}D{d}", f"{p} {A(**attrs)}")
+        add("ablation", "v2_ablation.csv", f"{sname}|OFF", f"{p} {A(**OFF)}")
+        for name, attrs in {"FULL-R": dict(QueueRewardWeight=0), "FULL-S": dict(QueueAwareSelect=False),
+                            "FULL-T": dict(TrendEpsilon=False), "FULL-P": dict(FailurePenalty=0)}.items():
+            add("ablation", "v2_ablation.csv", f"{sname}|{name}", f"{p} {A(**attrs)}")
+        add("ablation", "v2_ablation.csv", f"{sname}|QMAODV", f"--protocol=QMAODV {sargs}")
+        add("ablation", "v2_ablation.csv", f"{sname}|AODV", f"--protocol=AODV {sargs}")
 
-    # ---------------- main families ----------------
+    # ---- main families ----
     fams = {
         "N": [f"--numNodes={n} --pktInterval=0.25 --meanVelMin=5 --meanVelMax=5" for n in (5, 10, 15, 20, 25, 30, 40, 50)],
         "L": [f"--numNodes=20 --pktInterval={pi} --meanVelMin=5 --meanVelMax=5" for pi in (0.05, 0.10, 0.25, 0.50, 1.00)],
@@ -67,7 +78,7 @@ def jobs():
             for pr in PROTOS:
                 add("main", f"v2_family_{fam}.csv", f"{fam}{k}|{pr}", f"--protocol={pr} {cargs}")
 
-    # ---------------- realism (multi-hop) ----------------
+    # ---- realism (multi-hop) ----
     for n in (20, 30, 40):
         for traffic, targs in (("conv", "--numFlows=0"), ("pairs5", "--numFlows=5 --randomPairs=1")):
             for pr in PROTOS:
@@ -75,37 +86,37 @@ def jobs():
                     f"--protocol={pr} --numNodes={n} --pktInterval=0.10 --meanVelMin=15 --meanVelMax=15 "
                     f"--rangeM=300 --bcast11=1 {targs}")
 
-    # ---------------- sensitivity ----------------
-    ref = "--protocol=QS2MAODV --numNodes=20 --pktInterval=0.10 --meanVelMin=5 --meanVelMax=5"
-    for g in (0.0, 0.5, 0.9):
-        add("sens", "v2_sens.csv", f"gamma:{g}", f"{ref} --qsGamma={g}")
-    for w in (0.0, 0.1, 0.2, 0.3):
-        add("sens", "v2_sens.csv", f"w3:{w}", f"{ref} --qsW3={w} --adaptiveW3=0")
+    # ---- sensitivity (QSQMAODV, reference scenario) ----
+    p = f"--protocol=QSQMAODV {ref}"
+    for w in (0.0, 0.05, 0.10, 0.20, 0.30):
+        add("sens", "v2_sens.csv", f"wq:{w}", f"{p} {A(QueueRewardWeight=w, AdaptiveQueueWeight=False)}")
+    for b in (0.0, 0.25, 0.5, 1.0):
+        add("sens", "v2_sens.csv", f"beta:{b}", f"{p} {A(QueueSelectBeta=b)}")
     for t in (5, 10, 15, 20, 30):
-        add("sens", "v2_sens.csv", f"thr:{t}", f"{ref} --ackSilenceThreshold={t}")
+        add("sens", "v2_sens.csv", f"thr:{t}", f"{p} {A(AckSilenceThreshold=f'{t}s')}")
     for d in (0.85, 0.90, 0.92, 0.95, 0.99):
-        add("sens", "v2_sens.csv", f"decay:{d}", f"{ref} --decayFactor={d}")
+        add("sens", "v2_sens.csv", f"decay:{d}", f"{p} {A(DecayFactor=d)}")
+    for g in (0.0, 0.5, 0.9):
+        add("sens", "v2_sens.csv", f"gamma:{g}", f"{p} --qmGamma={g}")
     return J
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--sets", default="sanity,ablation,main,realism,sens",
                     help="comma list of: smoke,sanity,ablation,main,realism,sens")
-    ap.add_argument("--protocols", default="AODV,PMAODV,QMAODV,QS2MAODV",
-                    help="drop baselines that are not installed, e.g. AODV,QS2MAODV")
+    ap.add_argument("--protocols", default=",".join(PROTOS),
+                    help="restrict protocols, e.g. AODV,QMAODV,QSQMAODV")
     ap.add_argument("--out", default="jobs.tsv")
     a = ap.parse_args()
-    keep = set(a.sets.split(","))
-    allowed = set(a.protocols.split(","))
+    keep, allowed = set(a.sets.split(",")), set(a.protocols.split(","))
     def proto_of(args):
         for tok in args.split():
             if tok.startswith("--protocol="): return tok.split("=", 1)[1]
-        return "QS2MAODV"
+        return "QSQMAODV"
     J = [j for j in jobs() if j[0].split("|")[0] in keep and proto_of(j[2]) in allowed]
     with open(a.out, "w") as f:
         for jid, csv, args in J:
             f.write(f"{jid}\t{csv}\t{args}\n")
-    from collections import Counter
     print(f"{len(J)} jobs -> {a.out}")
     for k, v in Counter(j[0].split('|')[0] for j in J).items():
         print(f"  {k:9s} {v}")
