@@ -1,0 +1,11 @@
+.workspace
+data/v2/tmp/
+data/v2/.lock
+data/v2/done.txt
+data/v2/todo_ids.txt
+experiments/jobs*.tsv
+reports/
+__pycache__/
+*.pyc
+*.bak*
+.venv/
