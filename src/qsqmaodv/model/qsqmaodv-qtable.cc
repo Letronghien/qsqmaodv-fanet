@@ -1,9 +1,17 @@
-/* -*- Mode:C++; c-file-style:"gnu"; indent-tabs-mode:nil; -*- */
-/**
- * SA-QSQMAODV Self-Adaptive Q-Table — implementation.
- * See qsqmaodv-qtable.h for the design discussion.
+/*
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation;
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
-
 #include "qsqmaodv-qtable.h"
 
 #include "ns3/log.h"
@@ -11,6 +19,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numeric>
 
 namespace ns3
@@ -23,29 +32,16 @@ namespace qsqmaodv
 
 QTable::QTable(uint32_t maxPaths)
     : m_maxPaths(maxPaths),
-      // ---- Initial hyper-params (paper Table 1) ----
-      m_alpha(0.5),              // overwritten by Self-Adaptive controller
+      m_alpha(0.5),
       m_gamma(0.9),
       m_epsilon(0.3),
-      m_w1(0.5), m_w2(0.4), m_w3(0.1),
-      m_lowEnergyMode(false),
-      // ---- Adaptation knobs ----
-      m_epsilonMin(0.10),
-      m_epsilonMax(0.50),
-      m_epsilonStep(0.02),
-      m_epsilonBump(0.20),
-      m_lambda(0.1),
-      m_seqNoWindow(Seconds(5.0)),
-      m_lowEnergyThresh(0.20),
-      m_w1Normal(0.5), m_w2Normal(0.4), m_w3Normal(0.1),
-      m_w1Low(0.1),    m_w2Low(0.1),    m_w3Low(0.8)
+      m_w1(0.5),
+      m_w2(0.4),
+      m_epsilonStep(0.02)
 {
     m_uniform = CreateObject<UniformRandomVariable>();
 }
 
-// ============================================================================
-// Hyper-parameter configuration
-// ============================================================================
 void
 QTable::SetMaxPaths(uint32_t mp)
 {
@@ -53,158 +49,78 @@ QTable::SetMaxPaths(uint32_t mp)
     m_maxPaths = mp;
 }
 
-uint32_t QTable::GetMaxPaths() const { return m_maxPaths; }
+uint32_t
+QTable::GetMaxPaths() const
+{
+    return m_maxPaths;
+}
 
 void
 QTable::SetLearningParameters(double alpha0, double gamma, double epsilon0)
 {
     NS_ASSERT(alpha0 >= 0.0 && alpha0 <= 1.0);
-    NS_ASSERT(gamma  >= 0.0 && gamma  <= 1.0);
+    NS_ASSERT(gamma >= 0.0 && gamma <= 1.0);
     NS_ASSERT(epsilon0 >= 0.0 && epsilon0 <= 1.0);
-    m_alpha   = alpha0;
-    m_gamma   = gamma;
+    m_alpha = alpha0;
+    m_gamma = gamma;
     m_epsilon = epsilon0;
 }
 
 void
-QTable::SetRewardWeights(double w1, double w2, double w3)
+QTable::SetRewardWeights(double w1, double w2)
 {
-    m_w1 = w1; m_w2 = w2; m_w3 = w3;
-    m_w1Normal = w1; m_w2Normal = w2; m_w3Normal = w3;
-}
-
-void
-QTable::SetAdaptiveFlags(bool adaptEpsilon, bool adaptAlpha, bool adaptReward)
-{
-    m_adaptEpsilon = adaptEpsilon;
-    m_adaptAlpha = adaptAlpha;
-    m_adaptReward = adaptReward;
-}
-
-void QTable::SetLowEnergyThreshold(double frac) { m_lowEnergyThresh = frac; }
-void QTable::SetSensitivityLambda(double lambda) { m_lambda = lambda; }
-void QTable::SetSeqNoWindow(Time window) { m_seqNoWindow = window; }
-
-// ============================================================================
-// SELF-ADAPTIVE CONTROLLER (paper §4.2 - §4.4)
-// ============================================================================
-
-// §4.2 — Adaptive Exploration
-void
-QTable::OnRouteError()
-{
-    if (!m_adaptEpsilon) return;   // STEP3: no RERR bump in QSQMAODV
-    double oldEps = m_epsilon;
-    m_epsilon = std::min(m_epsilonMax, m_epsilon + m_epsilonBump);
-    NS_LOG_DEBUG("SAQM ε bump on RERR: " << oldEps << " → " << m_epsilon);
+    m_w1 = w1;
+    m_w2 = w2;
 }
 
 void
 QTable::PeriodicEpsilonDecay()
 {
-    double oldEps = m_epsilon;
-    // STEP3: SA-QSQMAODV keeps a floor eps_min; QSQMAODV (ICIT) decays down to 0
-    const double floorEps = m_adaptEpsilon ? m_epsilonMin : 0.0;
-    m_epsilon = std::max(floorEps, m_epsilon - m_epsilonStep);
-    NS_LOG_DEBUG("SAQM ε decayed: " << oldEps << " → " << m_epsilon);
+    m_epsilon = std::max(0.0, m_epsilon - m_epsilonStep);
 }
 
-// §4.3 — Adaptive Learning Rate
-void
-QTable::RecordSeqNoUpdate()
-{
-    m_seqEvents.push_back(Simulator::Now());
-    PurgeSeqNoEvents();
-}
-
-void
-QTable::PurgeSeqNoEvents()
-{
-    const Time threshold = Simulator::Now() - m_seqNoWindow;
-    while (!m_seqEvents.empty() && m_seqEvents.front() < threshold)
-        m_seqEvents.pop_front();
-}
-
-uint32_t
-QTable::GetDeltaSeq() const
-{
-    const Time threshold = Simulator::Now() - m_seqNoWindow;
-    while (!m_seqEvents.empty() && m_seqEvents.front() < threshold)
-        m_seqEvents.pop_front();
-    return static_cast<uint32_t>(m_seqEvents.size());
-}
-
-void
-QTable::RecomputeAdaptiveAlpha()
-{
-    // α_t = 0.1 + 0.8·(1 − exp(−λ·Δ_Seq))  ∈ [0.1, 0.9]
-    if (!m_adaptAlpha) return;     // STEP3: QSQMAODV keeps alpha = Alpha0
-    uint32_t dSeq = GetDeltaSeq();
-    double newAlpha = 0.1 + 0.8 * (1.0 - std::exp(-m_lambda * static_cast<double>(dSeq)));
-    NS_LOG_DEBUG("SAQM α recomputed: ΔSeq=" << dSeq << " → α=" << newAlpha);
-    m_alpha = newAlpha;
-}
-
-// §4.4 — Adaptive Reward Weights
-void
-QTable::RecomputeAdaptiveRewardWeights(double energyFraction)
-{
-    if (!m_adaptReward) return;    // STEP3: QSQMAODV keeps fixed weights
-    bool lowEnergyNow = (energyFraction < m_lowEnergyThresh);
-    if (lowEnergyNow != m_lowEnergyMode)
-    {
-        m_lowEnergyMode = lowEnergyNow;
-        if (lowEnergyNow)
-        {
-            m_w1 = m_w1Low; m_w2 = m_w2Low; m_w3 = m_w3Low;
-            NS_LOG_DEBUG("SAQM low-energy mode ON (E_res=" << energyFraction << ")");
-        }
-        else
-        {
-            m_w1 = m_w1Normal; m_w2 = m_w2Normal; m_w3 = m_w3Normal;
-            NS_LOG_DEBUG("SAQM low-energy mode OFF (E_res=" << energyFraction << ")");
-        }
-    }
-}
-
-// Compute r_t = w₁·ACK + w₂·1/(delay+1) + w₃·Energy
 double
-QTable::ComputeReward(double ackSuccess, double delaySec, double energyFrac) const
+QTable::ComputeReward(double ackSuccess, double delaySec) const
 {
-    if (delaySec < 0.0) delaySec = 0.0;
-    double r = m_w1 * ackSuccess
-             + m_w2 * ((m_delayRef > 0.0) ? 1.0 / (1.0 + delaySec / m_delayRef)   // STEP6
-                                          : 1.0 / (delaySec + 1.0))
-             + m_w3 * energyFrac;
-    return r;
+    const double oneMs = 0.001;
+    if (delaySec < 0.0)
+    {
+        delaySec = 0.0;
+    }
+    return m_w1 * ackSuccess + m_w2 * (1.0 / (1.0 + delaySec / oneMs));
 }
 
 // QS-QMAODV reward:
-//   r = s·(w1·ACK + w2·D) + w3·E + wq_eff·ACK·(1 − q_n) − P·(1 − ACK)
-//   s = (w1 + w2 − wq_eff)/(w1 + w2)  keeps the maximum reward unchanged.
+//   r = s*(w1*ACK + w2/(1 + d_ms)) + wq*ACK*(1 - q_n) - P*(1 - ACK)
+//   s = (w1 + w2 - wq)/(w1 + w2) keeps the maximum reward unchanged; wq is a fixed weight.
 // With wq = 0 and P = 0 this is exactly ComputeReward (same operations, same order).
 double
-QTable::ComputeRewardQs(double ackSuccess, double delaySec, double energyFrac, double qn) const
+QTable::ComputeRewardQs(double ackSuccess, double delaySec, double qn) const
 {
-    if (delaySec < 0.0) delaySec = 0.0;
+    const double oneMs = 0.001;
+    if (delaySec < 0.0)
+    {
+        delaySec = 0.0;
+    }
     qn = std::min(1.0, std::max(0.0, qn));
-    double wqEff = m_qs.wq;
-    if (m_qs.adaptiveWq && m_qs.wq > 0.0)
-        wqEff = std::min(m_qs.wqMax, m_qs.wq + m_qs.wqKappa * qn);
-    double base = m_w1 * ackSuccess
-                + m_w2 * ((m_delayRef > 0.0) ? 1.0 / (1.0 + delaySec / m_delayRef)
-                                             : 1.0 / (delaySec + 1.0));
+    const double wqEff = m_qs.wq;
+    double base = m_w1 * ackSuccess + m_w2 * (1.0 / (1.0 + delaySec / oneMs));
     if (wqEff > 0.0 && (m_w1 + m_w2) > 0.0)
+    {
         base *= (m_w1 + m_w2 - wqEff) / (m_w1 + m_w2);
-    double r = base + m_w3 * energyFrac;
-    if (wqEff > 0.0) r += wqEff * ackSuccess * (1.0 - qn);
-    if (m_qs.failPenalty > 0.0 && ackSuccess < 0.5) r -= m_qs.failPenalty;
+    }
+    double r = base;
+    if (wqEff > 0.0)
+    {
+        r += wqEff * ackSuccess * (1.0 - qn);
+    }
+    if (m_qs.failPenalty > 0.0 && ackSuccess < 0.5)
+    {
+        r -= m_qs.failPenalty;
+    }
     return r;
 }
 
-// ============================================================================
-// Standard Q-table operations (same as QSQMAODV)
-// ============================================================================
 std::vector<QRecord>::iterator
 QTable::FindWorst(std::vector<QRecord>& vec)
 {
@@ -274,14 +190,25 @@ void
 QTable::ReinitQValues(Ipv4Address dst)
 {
     auto it = m_records.find(dst);
-    if (it == m_records.end()) return;
+    if (it == m_records.end())
+    {
+        return;
+    }
     double sumInv = 0.0;
     for (const auto& r : it->second)
+    {
         sumInv += 1.0 / std::max<uint32_t>(1, r.rt.GetHop());
-    if (sumInv <= 0.0) return;
+    }
+    if (sumInv <= 0.0)
+    {
+        return;
+    }
     for (auto& r : it->second)
     {
-        if (r.txCount > 0) continue;  // preserve learned
+        if (r.txCount > 0)
+        {
+            continue;
+        }
         uint32_t hc = std::max<uint32_t>(1, r.rt.GetHop());
         r.qValue = (1.0 / hc) / sumInv;
     }
@@ -311,8 +238,7 @@ QTable::GetRoutes(Ipv4Address dst,
 }
 
 std::vector<QRecord>
-QTable::BuildCandidates(const RoutingTableEntry& primary,
-                        const RoutingTable* mainTable) const
+QTable::BuildCandidates(const RoutingTableEntry& primary, const RoutingTable* mainTable) const
 {
     Ipv4Address dst = primary.GetDestination();
     Ipv4Address primNh = primary.GetNextHop();
@@ -326,35 +252,45 @@ QTable::BuildCandidates(const RoutingTableEntry& primary,
         for (const auto& r : it->second)
         {
             if (r.rt.GetNextHop() == primNh)
-            { primQ = r.qValue; primFound = true; break; }
+            {
+                primQ = r.qValue;
+                primFound = true;
+                break;
+            }
         }
-    }
-
-    if (it != m_records.end())
-    {
         for (const auto& r : it->second)
         {
-            if (r.rt.GetNextHop() == primNh) continue;
-            if (r.rt.GetFlag() != VALID || r.rt.GetLifeTime() <= Time(0)) continue;
+            if (r.rt.GetNextHop() == primNh)
+            {
+                continue;
+            }
+            if (r.rt.GetFlag() != VALID || r.rt.GetLifeTime() <= Time(0))
+            {
+                continue;
+            }
             if (mainTable != nullptr)
             {
                 RoutingTableEntry nbr;
                 if (!const_cast<RoutingTable*>(mainTable)->LookupRoute(r.rt.GetNextHop(), nbr) ||
-                    nbr.GetFlag() != VALID) continue;
+                    nbr.GetFlag() != VALID)
+                {
+                    continue;
+                }
             }
             cands.push_back(r);
         }
     }
 
-    uint32_t hcP = std::max<uint32_t>(1, primary.GetHop());
-    double primQValue;
-    if (primFound) primQValue = primQ;
-    else
+    double primQValue = primQ;
+    if (!primFound)
     {
+        uint32_t hcP = std::max<uint32_t>(1, primary.GetHop());
         double sumInv = 1.0 / hcP;
         for (const auto& c : cands)
+        {
             sumInv += 1.0 / std::max<uint32_t>(1, c.rt.GetHop());
-        primQValue = (sumInv > 0.0) ? (1.0 / hcP) / sumInv : 0.5;
+        }
+        primQValue = (1.0 / hcP) / sumInv;
     }
     cands.insert(cands.begin(), QRecord(primary, primQValue));
     return cands;
@@ -367,7 +303,14 @@ QTable::SelectEpsilonGreedy(const RoutingTableEntry& primary,
                             Ipv4Address exclude)
 {
     auto cands = BuildCandidates(primary, mainTable);
-    // STEP5: never send a packet straight back to its previous hop
+    if (cands.size() > m_maxPaths)
+    {
+        // primary route and the shortest alternates, MaxPaths in total
+        std::stable_sort(cands.begin() + 1, cands.end(), [](const QRecord& a, const QRecord& b) {
+            return a.rt.GetHop() < b.rt.GetHop();
+        });
+        cands.resize(m_maxPaths);
+    }
     if (exclude != Ipv4Address())
     {
         cands.erase(std::remove_if(cands.begin(),
@@ -377,47 +320,113 @@ QTable::SelectEpsilonGreedy(const RoutingTableEntry& primary,
                                    }),
                     cands.end());
     }
-    if (cands.empty()) { out = primary; return false; }
-    if (cands.size() == 1) { out = cands[0].rt; return true; }
+    if (cands.empty())
+    {
+        out = primary;
+        return false;
+    }
+    if (cands.size() == 1)
+    {
+        out = cands[0].rt;
+        return true;
+    }
 
-    // STEP7: PMAODV probabilistic selection (paper Eq. 1), p_i proportional to 1/HC_i
     if (m_probabilistic)
     {
         double total = 0.0;
         for (const auto& c : cands)
+        {
             total += 1.0 / std::max<uint32_t>(1, c.rt.GetHop());
+        }
         double u = m_uniform->GetValue(0.0, total);
         double acc = 0.0;
         for (const auto& c : cands)
         {
             acc += 1.0 / std::max<uint32_t>(1, c.rt.GetHop());
-            if (u < acc) { out = c.rt; return true; }
+            if (u < acc)
+            {
+                out = c.rt;
+                return true;
+            }
         }
         out = cands.back().rt;
         return true;
     }
 
-    double u = m_uniform->GetValue(0.0, 1.0);
-    if (u < m_epsilon)
-    {
-        uint32_t idx = static_cast<uint32_t>(m_uniform->GetValue(0.0, static_cast<double>(cands.size())));
-        if (idx >= cands.size()) idx = cands.size() - 1;
-        out = cands[idx].rt;
-        return true;
-    }
-
-    // QS: queue-aware exploitation score  Q − beta·q_n·max|Q|  (sign-safe)
+    // QS-QMAODV: queue state of every candidate next hop (only when a QS option needs it)
     std::vector<double> qn(cands.size(), 0.0);
     double qScale = 0.0;
-    bool qsSel = m_qs.queueSelect && m_nhQueueFn;
-    if (qsSel)
+    const bool qsSel = m_qs.queueSelect && m_nhQueueFn;
+    const bool qsExp = m_qs.queueExplore && m_nhQueueFn;
+    if (qsSel || qsExp)
     {
         for (size_t i = 0; i < cands.size(); ++i)
         {
             qn[i] = std::min(1.0, std::max(0.0, m_nhQueueFn(cands[i].rt.GetNextHop())));
             qScale = std::max(qScale, std::fabs(cands[i].qValue));
         }
-        if (qScale < 1e-6) qScale = 1.0;
+        if (qScale < 1e-6)
+        {
+            qScale = 1.0;
+        }
+    }
+    auto greedy = [&]() {
+        size_t best = 0;
+        double bq = -std::numeric_limits<double>::infinity();
+        uint32_t bhc = std::numeric_limits<uint32_t>::max();
+        for (size_t i = 0; i < cands.size(); ++i)
+        {
+            double q = cands[i].qValue;
+            if (qsSel)
+            {
+                q -= m_qs.beta * qn[i] * qScale; // queue-aware exploitation (sign-safe)
+            }
+            uint32_t hc = cands[i].rt.GetHop();
+            if (q > bq || (std::fabs(q - bq) < 1e-9 && hc < bhc))
+            {
+                bq = q;
+                bhc = hc;
+                best = i;
+            }
+        }
+        return best;
+    };
+    if (qsExp)
+    {
+        // queue-driven exploration: eps_eff = floor + (eps - floor) * q of the greedy next hop
+        size_t g = greedy();
+        double floor = std::min(m_qs.exploreFloor, m_epsilon);
+        double epsEff = floor + (m_epsilon - floor) * qn[g];
+        if (m_uniform->GetValue(0.0, 1.0) < epsEff)
+        {
+            auto idx = static_cast<uint32_t>(m_uniform->GetValue(0.0, static_cast<double>(cands.size())));
+            if (idx >= cands.size())
+            {
+                idx = cands.size() - 1;
+            }
+            out = cands[idx].rt;
+            return true;
+        }
+        out = cands[g].rt;
+        return true;
+    }
+
+    double u = m_uniform->GetValue(0.0, 1.0);
+    if (u < m_epsilon)
+    {
+        auto idx = static_cast<uint32_t>(m_uniform->GetValue(0.0, static_cast<double>(cands.size())));
+        if (idx >= cands.size())
+        {
+            idx = cands.size() - 1;
+        }
+        out = cands[idx].rt;
+        return true;
+    }
+
+    if (qsSel)
+    {
+        out = cands[greedy()].rt;
+        return true;
     }
     size_t bestIdx = 0;
     double bestQ = -std::numeric_limits<double>::infinity();
@@ -425,54 +434,65 @@ QTable::SelectEpsilonGreedy(const RoutingTableEntry& primary,
     for (size_t i = 0; i < cands.size(); ++i)
     {
         double q = cands[i].qValue;
-        if (qsSel) q -= m_qs.beta * qn[i] * qScale;
         uint32_t hc = cands[i].rt.GetHop();
         if (q > bestQ || (std::fabs(q - bestQ) < 1e-9 && hc < bestHC))
-        { bestQ = q; bestHC = hc; bestIdx = i; }
+        {
+            bestQ = q;
+            bestHC = hc;
+            bestIdx = i;
+        }
     }
     out = cands[bestIdx].rt;
     return true;
-}
-
-// Q-update: Eq. 4 with adaptive α_t and r_t.
-void
-QTable::UpdateQValueQs(Ipv4Address dst,
-                     Ipv4Address nextHop,
-                     double ackSuccess,
-                     double delaySec,
-                     double energyFraction,
-                     double qn)
-{
-    double reward = ComputeRewardQs(ackSuccess, delaySec, energyFraction, qn);
-
-    auto it = m_records.find(dst);
-    if (it == m_records.end()) return;
-
-    QRecord* target = nullptr;
-    double maxFuture = 0.0;
-    for (auto& r : it->second)
-    {
-        if (r.qValue > maxFuture) maxFuture = r.qValue;
-        if (r.rt.GetNextHop() == nextHop) target = &r;
-    }
-    if (target == nullptr) return;
-
-    double oldQ = target->qValue;
-    // Eq. 4: Q ← (1 − α_t)·Q + α_t·[r_t + γ · max Q]
-    target->qValue = (1.0 - m_alpha) * oldQ + m_alpha * (reward + m_gamma * maxFuture);
-    target->txCount += 1;
-    if (ackSuccess > 0.5) { target->ackCount += 1; target->lastAck = Simulator::Now(); }
-    target->lastUpd = Simulator::Now();
 }
 
 void
 QTable::UpdateQValue(Ipv4Address dst,
                      Ipv4Address nextHop,
                      double ackSuccess,
-                     double delaySec,
-                     double energyFraction)
+                     double delaySec)
 {
-    UpdateQValueQs(dst, nextHop, ackSuccess, delaySec, energyFraction, 0.0);
+    UpdateQValueQs(dst, nextHop, ackSuccess, delaySec, 0.0);
+}
+
+void
+QTable::UpdateQValueQs(Ipv4Address dst,
+                       Ipv4Address nextHop,
+                       double ackSuccess,
+                       double delaySec,
+                       double qn)
+{
+    double reward = ComputeRewardQs(ackSuccess, delaySec, qn);
+    auto it = m_records.find(dst);
+    if (it == m_records.end())
+    {
+        return;
+    }
+    QRecord* target = nullptr;
+    double maxFuture = 0.0;
+    for (auto& r : it->second)
+    {
+        if (r.qValue > maxFuture)
+        {
+            maxFuture = r.qValue;
+        }
+        if (r.rt.GetNextHop() == nextHop)
+        {
+            target = &r;
+        }
+    }
+    if (target == nullptr)
+    {
+        return;
+    }
+    target->qValue =
+        (1.0 - m_alpha) * target->qValue + m_alpha * (reward + m_gamma * maxFuture);
+    target->txCount += 1;
+    if (ackSuccess > 0.5)
+    {
+        target->ackCount += 1;
+        target->lastAck = Simulator::Now();
+    }
 }
 
 uint32_t
@@ -480,92 +500,59 @@ QTable::DecayStale(Time now, double tauSec, double factor, uint32_t minTx)
 {
     uint32_t n = 0;
     for (auto& kv : m_records)
+    {
         for (auto& r : kv.second)
+        {
             if (r.txCount >= minTx && r.qValue > 0.0 && (now - r.lastAck).GetSeconds() > tauSec)
             {
-                r.qValue *= factor;   // negative estimates (penalties) are kept
+                r.qValue *= factor; // negative estimates (penalties) are kept
                 ++n;
             }
+        }
+    }
     return n;
 }
 
-void
-QTable::UpdateQValueOrCreate(const RoutingTableEntry& rt,
-                             double ackSuccess, double delaySec,
-                             double energyFraction)
+uint32_t
+QTable::Size() const
 {
-    EnsureRecord(rt);
-    UpdateQValue(rt.GetDestination(), rt.GetNextHop(),
-                 ackSuccess, delaySec, energyFraction);
-}
-
-void QTable::DeleteRoutes(Ipv4Address dst) { m_records.erase(dst); }
-
-void
-QTable::DeleteRoute(Ipv4Address dst, Ipv4Address nh)
-{
-    auto it = m_records.find(dst);
-    if (it == m_records.end()) return;
-    auto& vec = it->second;
-    vec.erase(std::remove_if(vec.begin(), vec.end(),
-              [&](const QRecord& r) { return r.rt.GetNextHop() == nh; }),
-              vec.end());
-    if (vec.empty()) m_records.erase(it);
-}
-
-void
-QTable::RemoveNextHopGlobally(Ipv4Address nh)
-{
-    for (auto it = m_records.begin(); it != m_records.end(); )
-    {
-        auto& vec = it->second;
-        vec.erase(std::remove_if(vec.begin(), vec.end(),
-                  [&](const QRecord& r) { return r.rt.GetNextHop() == nh; }),
-                  vec.end());
-        if (vec.empty()) it = m_records.erase(it); else ++it;
-    }
-}
-
-uint32_t QTable::Size() const
-{
-    return std::accumulate(m_records.begin(), m_records.end(), uint32_t{0},
+    return std::accumulate(m_records.begin(),
+                           m_records.end(),
+                           uint32_t{0},
                            [](uint32_t a, const auto& kv) { return a + kv.second.size(); });
 }
 
-uint32_t QTable::CountFor(Ipv4Address dst) const
+uint32_t
+QTable::CountFor(Ipv4Address dst) const
 {
     auto it = m_records.find(dst);
     return (it == m_records.end()) ? 0 : static_cast<uint32_t>(it->second.size());
 }
 
-bool QTable::IsFull(Ipv4Address dst) const { return CountFor(dst) >= m_maxPaths; }
-
-void QTable::Clear() { m_records.clear(); m_seqEvents.clear(); }
-
-double QTable::GetQValue(Ipv4Address dst, Ipv4Address nh) const
+bool
+QTable::IsFull(Ipv4Address dst) const
 {
-    auto it = m_records.find(dst);
-    if (it == m_records.end()) return 0.0;
-    for (const auto& r : it->second) if (r.rt.GetNextHop() == nh) return r.qValue;
-    return 0.0;
+    return CountFor(dst) >= m_maxPaths;
+}
+
+void
+QTable::Clear()
+{
+    m_records.clear();
 }
 
 void
 QTable::Print(std::ostream& os) const
 {
-    os << "SA-Q-Table (" << Size() << " entries; α=" << m_alpha
-       << " γ=" << m_gamma << " ε=" << m_epsilon
-       << " w=(" << m_w1 << "," << m_w2 << "," << m_w3 << ")"
-       << " lowE=" << m_lowEnergyMode << "):\n";
+    os << "Q-table (" << Size() << " routes; alpha=" << m_alpha << " gamma=" << m_gamma
+       << " epsilon=" << m_epsilon << "):\n";
     for (const auto& kv : m_records)
     {
-        os << "  dst=" << kv.first << " alts=" << kv.second.size() << "\n";
+        os << "  dst=" << kv.first << "\n";
         for (const auto& r : kv.second)
         {
-            os << "    via " << r.rt.GetNextHop()
-               << " HC=" << (uint32_t)r.rt.GetHop()
-               << " Q=" << r.qValue
-               << " tx=" << r.txCount << " ack=" << r.ackCount << "\n";
+            os << "    via " << r.rt.GetNextHop() << " HC=" << (uint32_t)r.rt.GetHop()
+               << " Q=" << r.qValue << " updates=" << r.txCount << "\n";
         }
     }
 }

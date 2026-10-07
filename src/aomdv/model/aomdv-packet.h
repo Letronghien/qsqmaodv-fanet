@@ -1,216 +1,716 @@
-/* -*- Mode:C++; c-file-style:"gnu"; indent-tabs-mode:nil; -*- */
 /*
- * AOMDV (Ad hoc On-demand Multipath Distance Vector) Packet Definitions
- * Based on Marina & Das, Wireless Communications and Mobile Computing, 2006
- * Adapted for NS-3 v3.40 - FANET/UAV Simulation
+ * Copyright (c) 2009 IITP RAS
+ *
+ * SPDX-License-Identifier: GPL-2.0-only
+ *
+ * Based on
+ *      NS-2 AODV model developed by the CMU/MONARCH group and optimized and
+ *      tuned by Samir Das and Mahesh Marina, University of Cincinnati;
+ *
+ *      AODV-UU implementation by Erik Nordström of Uppsala University
+ *      https://web.archive.org/web/20100527072022/http://core.it.uu.se/core/index.php/AODV-UU
+ *
+ * Authors: Elena Buchatskaia <borovkovaes@iitp.ru>
+ *          Pavel Boyko <boyko@iitp.ru>
  */
-#ifndef AOMDV_PACKET_H
-#define AOMDV_PACKET_H
+#ifndef AOMDVPACKET_H
+#define AOMDVPACKET_H
 
+#include "ns3/enum.h"
 #include "ns3/header.h"
 #include "ns3/ipv4-address.h"
 #include "ns3/nstime.h"
+
+#include <iostream>
 #include <map>
 
-namespace ns3 {
-namespace aomdv {
+namespace ns3
+{
+namespace aomdv
+{
 
 /**
- * \brief MessageType enum for AOMDV control packets
+ * @ingroup aomdv
+ * @brief MessageType enumeration
  */
 enum MessageType
 {
-  AODVTYPE_RREQ  = 1,  //!< RREQ
-  AODVTYPE_RREP  = 2,  //!< RREP
-  AODVTYPE_RERR  = 3,  //!< RERR
-  AODVTYPE_RREP_ACK = 4 //!< RREP-ACK
+    AOMDVTYPE_RREQ = 1,    //!< AOMDVTYPE_RREQ
+    AOMDVTYPE_RREP = 2,    //!< AOMDVTYPE_RREP
+    AOMDVTYPE_RERR = 3,    //!< AOMDVTYPE_RERR
+    AOMDVTYPE_RREP_ACK = 4 //!< AOMDVTYPE_RREP_ACK
 };
 
 /**
- * \brief AOMDV RREQ header
- *
- *  0                   1                   2                   3
- *  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
- * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- * |     Type      |J|R|G|D|U|  Reserved   |   Hop Count           |
- * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- * |                            RREQ ID                             |
- * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- * |                    Destination IP Address                      |
- * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- * |                  Destination Sequence Number                   |
- * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- * |                    Originator IP Address                       |
- * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- * |                  Originator Sequence Number                    |
- * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- * |                    First Hop IP Address   (AOMDV extension)    |
- * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- * |                   Last Hop IP Address    (AOMDV extension)     |
- * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ * @ingroup aomdv
+ * @brief AOMDV types
  */
+class TypeHeader : public Header
+{
+  public:
+    /**
+     * constructor
+     * @param t the AOMDV RREQ type
+     */
+    TypeHeader(MessageType t = AOMDVTYPE_RREQ);
+
+    /**
+     * @brief Get the type ID.
+     * @return the object TypeId
+     */
+    static TypeId GetTypeId();
+    TypeId GetInstanceTypeId() const override;
+    uint32_t GetSerializedSize() const override;
+    void Serialize(Buffer::Iterator start) const override;
+    uint32_t Deserialize(Buffer::Iterator start) override;
+    void Print(std::ostream& os) const override;
+
+    /**
+     * @returns the type
+     */
+    MessageType Get() const
+    {
+        return m_type;
+    }
+
+    /**
+     * Check that type if valid
+     * @returns true if the type is valid
+     */
+    bool IsValid() const
+    {
+        return m_valid;
+    }
+
+    /**
+     * @brief Comparison operator
+     * @param o header to compare
+     * @return true if the headers are equal
+     */
+    bool operator==(const TypeHeader& o) const;
+
+  private:
+    MessageType m_type; ///< type of the message
+    bool m_valid;       ///< Indicates if the message is valid
+};
+
+/**
+ * @brief Stream output operator
+ * @param os output stream
+ * @param h the TypeHeader
+ * @return updated stream
+ */
+std::ostream& operator<<(std::ostream& os, const TypeHeader& h);
+
+/**
+* @ingroup aomdv
+* @brief   Route Request (RREQ) Message Format
+  \verbatim
+  0                   1                   2                   3
+  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |     Type      |J|R|G|D|U|   Reserved          |   Hop Count   |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                            RREQ ID                            |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                    Destination IP Address                     |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                  Destination Sequence Number                  |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                    Originator IP Address                      |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                  Originator Sequence Number                   |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  \endverbatim
+*/
 class RreqHeader : public Header
 {
-public:
-  RreqHeader (uint8_t flags = 0, uint8_t reserved = 0, uint8_t hopCount = 0,
-              uint32_t requestID = 0, Ipv4Address dst = Ipv4Address (),
-              uint32_t dstSeqNo = 0, Ipv4Address origin = Ipv4Address (),
-              uint32_t originSeqNo = 0);
+  public:
+    /**
+     * constructor
+     *
+     * @param flags the message flags (0)
+     * @param reserved the reserved bits (0)
+     * @param hopCount the hop count
+     * @param requestID the request ID
+     * @param dst the destination IP address
+     * @param dstSeqNo the destination sequence number
+     * @param origin the origin IP address
+     * @param originSeqNo the origin sequence number
+     */
+    RreqHeader(uint8_t flags = 0,
+               uint8_t reserved = 0,
+               uint8_t hopCount = 0,
+               uint32_t requestID = 0,
+               Ipv4Address dst = Ipv4Address(),
+               uint32_t dstSeqNo = 0,
+               Ipv4Address origin = Ipv4Address(),
+               uint32_t originSeqNo = 0);
 
-  static TypeId GetTypeId ();
-  TypeId GetInstanceTypeId () const override;
-  uint32_t GetSerializedSize () const override;
-  void Serialize (Buffer::Iterator start) const override;
-  uint32_t Deserialize (Buffer::Iterator start) override;
-  void Print (std::ostream &os) const override;
+    /**
+     * @brief Get the type ID.
+     * @return the object TypeId
+     */
+    static TypeId GetTypeId();
+    TypeId GetInstanceTypeId() const override;
+    uint32_t GetSerializedSize() const override;
+    void Serialize(Buffer::Iterator start) const override;
+    uint32_t Deserialize(Buffer::Iterator start) override;
+    void Print(std::ostream& os) const override;
 
-  // Flags
-  void SetGratiousRrep (bool f);
-  bool GetGratiousRrep () const;
-  void SetDestinationOnly (bool f);
-  bool GetDestinationOnly () const;
-  void SetUnknownSeqno (bool f);
-  bool GetUnknownSeqno () const;
+    // Fields
+    /**
+     * @brief Set the hop count
+     * @param count the hop count
+     */
+    void SetHopCount(uint8_t count)
+    {
+        m_hopCount = count;
+    }
 
-  void SetHopCount (uint8_t count) { m_hopCount = count; }
-  uint8_t GetHopCount () const { return m_hopCount; }
-  void SetId (uint32_t id) { m_requestID = id; }
-  uint32_t GetId () const { return m_requestID; }
-  void SetDst (Ipv4Address a) { m_dst = a; }
-  Ipv4Address GetDst () const { return m_dst; }
-  void SetDstSeqno (uint32_t s) { m_dstSeqNo = s; }
-  uint32_t GetDstSeqno () const { return m_dstSeqNo; }
-  void SetOrigin (Ipv4Address a) { m_origin = a; }
-  Ipv4Address GetOrigin () const { return m_origin; }
-  void SetOriginSeqno (uint32_t s) { m_originSeqNo = s; }
-  uint32_t GetOriginSeqno () const { return m_originSeqNo; }
+    /**
+     * @brief Get the hop count
+     * @return the hop count
+     */
+    uint8_t GetHopCount() const
+    {
+        return m_hopCount;
+    }
 
-  // AOMDV extensions: first/last hop tracking for disjoint path discovery
-  void SetFirstHop (Ipv4Address a) { m_firstHop = a; }
-  Ipv4Address GetFirstHop () const { return m_firstHop; }
-  void SetLastHop (Ipv4Address a) { m_lastHop = a; }
-  Ipv4Address GetLastHop () const { return m_lastHop; }
+    /**
+     * @brief Set the request ID
+     * @param id the request ID
+     */
+    void SetId(uint32_t id)
+    {
+        m_requestID = id;
+    }
 
-  bool operator== (RreqHeader const & o) const;
+    /**
+     * @brief Get the request ID
+     * @return the request ID
+     */
+    uint32_t GetId() const
+    {
+        return m_requestID;
+    }
 
-private:
-  uint8_t      m_flags;      ///< J R G D U flags
-  uint8_t      m_reserved;
-  uint8_t      m_hopCount;
-  uint32_t     m_requestID;
-  Ipv4Address  m_dst;
-  uint32_t     m_dstSeqNo;
-  Ipv4Address  m_origin;
-  uint32_t     m_originSeqNo;
-  Ipv4Address  m_firstHop;   ///< AOMDV: first hop from originator
-  Ipv4Address  m_lastHop;    ///< AOMDV: last hop before destination
+    /**
+     * @brief Set the destination address
+     * @param a the destination address
+     */
+    void SetDst(Ipv4Address a)
+    {
+        m_dst = a;
+    }
+
+    /**
+     * @brief Get the destination address
+     * @return the destination address
+     */
+    Ipv4Address GetDst() const
+    {
+        return m_dst;
+    }
+
+    /**
+     * @brief Set the destination sequence number
+     * @param s the destination sequence number
+     */
+    void SetDstSeqno(uint32_t s)
+    {
+        m_dstSeqNo = s;
+    }
+
+    /**
+     * @brief Get the destination sequence number
+     * @return the destination sequence number
+     */
+    uint32_t GetDstSeqno() const
+    {
+        return m_dstSeqNo;
+    }
+
+    /**
+     * @brief Set the origin address
+     * @param a the origin address
+     */
+    void SetOrigin(Ipv4Address a)
+    {
+        m_origin = a;
+    }
+
+    /**
+     * @brief Get the origin address
+     * @return the origin address
+     */
+    Ipv4Address GetOrigin() const
+    {
+        return m_origin;
+    }
+
+    /**
+     * @brief Set the origin sequence number
+     * @param s the origin sequence number
+     */
+    void SetOriginSeqno(uint32_t s)
+    {
+        m_originSeqNo = s;
+    }
+
+    /**
+     * @brief Get the origin sequence number
+     * @return the origin sequence number
+     */
+    uint32_t GetOriginSeqno() const
+    {
+        return m_originSeqNo;
+    }
+
+    // Flags
+    /**
+     * @brief Set the gratuitous RREP flag
+     * @param f the gratuitous RREP flag
+     */
+    void SetGratuitousRrep(bool f);
+    /**
+     * @brief Get the gratuitous RREP flag
+     * @return the gratuitous RREP flag
+     */
+    bool GetGratuitousRrep() const;
+    /**
+     * @brief Set the Destination only flag
+     * @param f the Destination only flag
+     */
+    void SetDestinationOnly(bool f);
+    /**
+     * @brief Get the Destination only flag
+     * @return the Destination only flag
+     */
+    bool GetDestinationOnly() const;
+    /**
+     * @brief Set the unknown sequence number flag
+     * @param f the unknown sequence number flag
+     */
+    void SetUnknownSeqno(bool f);
+    /**
+     * @brief Get the unknown sequence number flag
+     * @return the unknown sequence number flag
+     */
+    bool GetUnknownSeqno() const;
+
+    /**
+     * @brief Comparison operator
+     * @param o RREQ header to compare
+     * @return true if the RREQ headers are equal
+     */
+    bool operator==(const RreqHeader& o) const;
+
+    /**
+     * @brief Set the AOMDV first hop
+     * @param a the first hop
+     */
+    void SetFirstHop(Ipv4Address a)
+    {
+        m_firstHop = a;
+    }
+
+    /**
+     * @brief Get the AOMDV first hop
+     * @return the first hop
+     */
+    Ipv4Address GetFirstHop() const
+    {
+        return m_firstHop;
+    }
+
+  private:
+    uint8_t m_flags;        ///< |J|R|G|D|U| bit flags, see RFC
+    uint8_t m_reserved;     ///< Not used (must be 0)
+    uint8_t m_hopCount;     ///< Hop Count
+    uint32_t m_requestID;   ///< RREQ ID
+    Ipv4Address m_dst;      ///< Destination IP Address
+    uint32_t m_dstSeqNo;    ///< Destination Sequence Number
+    Ipv4Address m_origin;   ///< Originator IP Address
+    uint32_t m_originSeqNo; ///< Source Sequence Number
+    Ipv4Address m_firstHop;  ///< AOMDV first hop (neighbour of the origin)
 };
 
-std::ostream & operator<< (std::ostream & os, RreqHeader const &);
+/**
+ * @brief Stream output operator
+ * @param os output stream
+ * @return updated stream
+ */
+std::ostream& operator<<(std::ostream& os, const RreqHeader&);
 
 /**
- * \brief AOMDV RREP header
- */
+* @ingroup aomdv
+* @brief Route Reply (RREP) Message Format
+  \verbatim
+  0                   1                   2                   3
+  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |     Type      |R|A|    Reserved     |Prefix Sz|   Hop Count   |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                     Destination IP address                    |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                  Destination Sequence Number                  |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                    Originator IP address                      |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                           Lifetime                            |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  \endverbatim
+*/
 class RrepHeader : public Header
 {
-public:
-  RrepHeader (uint8_t prefixSize = 0, uint8_t hopCount = 0,
-              Ipv4Address dst = Ipv4Address (),
-              uint32_t dstSeqNo = 0,
-              Ipv4Address origin = Ipv4Address (),
-              Time lifetime = MilliSeconds (0));
+  public:
+    /**
+     * constructor
+     *
+     * @param prefixSize the prefix size (0)
+     * @param hopCount the hop count (0)
+     * @param dst the destination IP address
+     * @param dstSeqNo the destination sequence number
+     * @param origin the origin IP address
+     * @param lifetime the lifetime
+     */
+    RrepHeader(uint8_t prefixSize = 0,
+               uint8_t hopCount = 0,
+               Ipv4Address dst = Ipv4Address(),
+               uint32_t dstSeqNo = 0,
+               Ipv4Address origin = Ipv4Address(),
+               Time lifetime = MilliSeconds(0));
+    /**
+     * @brief Get the type ID.
+     * @return the object TypeId
+     */
+    static TypeId GetTypeId();
+    TypeId GetInstanceTypeId() const override;
+    uint32_t GetSerializedSize() const override;
+    void Serialize(Buffer::Iterator start) const override;
+    uint32_t Deserialize(Buffer::Iterator start) override;
+    void Print(std::ostream& os) const override;
 
-  static TypeId GetTypeId ();
-  TypeId GetInstanceTypeId () const override;
-  uint32_t GetSerializedSize () const override;
-  void Serialize (Buffer::Iterator start) const override;
-  uint32_t Deserialize (Buffer::Iterator start) override;
-  void Print (std::ostream &os) const override;
+    // Fields
+    /**
+     * @brief Set the hop count
+     * @param count the hop count
+     */
+    void SetHopCount(uint8_t count)
+    {
+        m_hopCount = count;
+    }
 
-  void SetHopCount (uint8_t count) { m_hopCount = count; }
-  uint8_t GetHopCount () const { return m_hopCount; }
-  void SetDst (Ipv4Address a) { m_dst = a; }
-  Ipv4Address GetDst () const { return m_dst; }
-  void SetDstSeqno (uint32_t s) { m_dstSeqNo = s; }
-  uint32_t GetDstSeqno () const { return m_dstSeqNo; }
-  void SetOrigin (Ipv4Address a) { m_origin = a; }
-  Ipv4Address GetOrigin () const { return m_origin; }
-  void SetLifeTime (Time t);
-  Time GetLifeTime () const;
-  void SetAckRequired (bool f);
-  bool GetAckRequired () const;
-  void SetPrefixSize (uint8_t sz);
-  uint8_t GetPrefixSize () const;
+    /**
+     * @brief Get the hop count
+     * @return the hop count
+     */
+    uint8_t GetHopCount() const
+    {
+        return m_hopCount;
+    }
 
-  // AOMDV: advertised hop count at destination (for loop-freedom)
-  void SetAdvertisedHopCount (uint8_t hc) { m_advHopCount = hc; }
-  uint8_t GetAdvertisedHopCount () const { return m_advHopCount; }
+    /**
+     * @brief Set the destination address
+     * @param a the destination address
+     */
+    void SetDst(Ipv4Address a)
+    {
+        m_dst = a;
+    }
 
-  bool operator== (RrepHeader const & o) const;
+    /**
+     * @brief Get the destination address
+     * @return the destination address
+     */
+    Ipv4Address GetDst() const
+    {
+        return m_dst;
+    }
 
-private:
-  uint8_t      m_flags;
-  uint8_t      m_prefixSize;
-  uint8_t      m_hopCount;
-  uint8_t      m_advHopCount;  ///< AOMDV advertised hop count
-  Ipv4Address  m_dst;
-  uint32_t     m_dstSeqNo;
-  Ipv4Address  m_origin;
-  uint32_t     m_lifeTime;
+    /**
+     * @brief Set the destination sequence number
+     * @param s the destination sequence number
+     */
+    void SetDstSeqno(uint32_t s)
+    {
+        m_dstSeqNo = s;
+    }
+
+    /**
+     * @brief Get the destination sequence number
+     * @return the destination sequence number
+     */
+    uint32_t GetDstSeqno() const
+    {
+        return m_dstSeqNo;
+    }
+
+    /**
+     * @brief Set the origin address
+     * @param a the origin address
+     */
+    void SetOrigin(Ipv4Address a)
+    {
+        m_origin = a;
+    }
+
+    /**
+     * @brief Get the origin address
+     * @return the origin address
+     */
+    Ipv4Address GetOrigin() const
+    {
+        return m_origin;
+    }
+
+    /**
+     * @brief Set the lifetime
+     * @param t the lifetime
+     */
+    void SetLifeTime(Time t);
+    /**
+     * @brief Get the lifetime
+     * @return the lifetime
+     */
+    Time GetLifeTime() const;
+
+    // Flags
+    /**
+     * @brief Set the ack required flag
+     * @param f the ack required flag
+     */
+    void SetAckRequired(bool f);
+    /**
+     * @brief get the ack required flag
+     * @return the ack required flag
+     */
+    bool GetAckRequired() const;
+    /**
+     * @brief Set the prefix size
+     * @param sz the prefix size
+     */
+    void SetPrefixSize(uint8_t sz);
+    /**
+     * @brief Set the prefix size
+     * @return the prefix size
+     */
+    uint8_t GetPrefixSize() const;
+
+    /**
+     * Configure RREP to be a Hello message
+     *
+     * @param src the source IP address
+     * @param srcSeqNo the source sequence number
+     * @param lifetime the lifetime of the message
+     */
+    void SetHello(Ipv4Address src, uint32_t srcSeqNo, Time lifetime);
+
+    /**
+     * @brief Comparison operator
+     * @param o RREP header to compare
+     * @return true if the RREP headers are equal
+     */
+    bool operator==(const RrepHeader& o) const;
+
+    /**
+     * @brief Set the AOMDV broadcast id
+     * @param id the broadcast id
+     */
+    void SetBcastId(uint32_t id)
+    {
+        m_bcastId = id;
+    }
+
+    /**
+     * @brief Get the AOMDV broadcast id
+     * @return the broadcast id
+     */
+    uint32_t GetBcastId() const
+    {
+        return m_bcastId;
+    }
+
+    /**
+     * @brief Set the AOMDV first hop
+     * @param a the first hop
+     */
+    void SetFirstHop(Ipv4Address a)
+    {
+        m_firstHop = a;
+    }
+
+    /**
+     * @brief Get the AOMDV first hop
+     * @return the first hop
+     */
+    Ipv4Address GetFirstHop() const
+    {
+        return m_firstHop;
+    }
+
+  private:
+    uint8_t m_flags;      ///< A - acknowledgment required flag
+    uint8_t m_prefixSize; ///< Prefix Size
+    uint8_t m_hopCount;   ///< Hop Count
+    Ipv4Address m_dst;    ///< Destination IP Address
+    uint32_t m_dstSeqNo;  ///< Destination Sequence Number
+    Ipv4Address m_origin; ///< Source IP Address
+    uint32_t m_lifeTime;  ///< Lifetime (in milliseconds)
+    uint32_t m_bcastId;      ///< AOMDV broadcast id of the RREQ being answered
+    Ipv4Address m_firstHop;  ///< AOMDV first hop (neighbour of the RREP sender side)
 };
 
-std::ostream & operator<< (std::ostream & os, RrepHeader const &);
+/**
+ * @brief Stream output operator
+ * @param os output stream
+ * @return updated stream
+ */
+std::ostream& operator<<(std::ostream& os, const RrepHeader&);
 
 /**
- * \brief RREP-ACK header
- */
+* @ingroup aomdv
+* @brief Route Reply Acknowledgment (RREP-ACK) Message Format
+  \verbatim
+  0                   1
+  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |     Type      |   Reserved    |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  \endverbatim
+*/
 class RrepAckHeader : public Header
 {
-public:
-  RrepAckHeader ();
-  static TypeId GetTypeId ();
-  TypeId GetInstanceTypeId () const override;
-  uint32_t GetSerializedSize () const override;
-  void Serialize (Buffer::Iterator start) const override;
-  uint32_t Deserialize (Buffer::Iterator start) override;
-  void Print (std::ostream &os) const override;
-  bool operator== (RrepAckHeader const & o) const;
+  public:
+    /// constructor
+    RrepAckHeader();
 
-private:
-  uint8_t m_reserved;
+    /**
+     * @brief Get the type ID.
+     * @return the object TypeId
+     */
+    static TypeId GetTypeId();
+    TypeId GetInstanceTypeId() const override;
+    uint32_t GetSerializedSize() const override;
+    void Serialize(Buffer::Iterator start) const override;
+    uint32_t Deserialize(Buffer::Iterator start) override;
+    void Print(std::ostream& os) const override;
+
+    /**
+     * @brief Comparison operator
+     * @param o RREP header to compare
+     * @return true if the RREQ headers are equal
+     */
+    bool operator==(const RrepAckHeader& o) const;
+
+  private:
+    uint8_t m_reserved; ///< Not used (must be 0)
 };
 
 /**
- * \brief RERR (Route Error) header
+ * @brief Stream output operator
+ * @param os output stream
+ * @return updated stream
  */
+std::ostream& operator<<(std::ostream& os, const RrepAckHeader&);
+
+/**
+* @ingroup aomdv
+* @brief Route Error (RERR) Message Format
+  \verbatim
+  0                   1                   2                   3
+  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |     Type      |N|          Reserved           |   DestCount   |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |            Unreachable Destination IP Address (1)             |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |         Unreachable Destination Sequence Number (1)           |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-|
+  |  Additional Unreachable Destination IP Addresses (if needed)  |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |Additional Unreachable Destination Sequence Numbers (if needed)|
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  \endverbatim
+*/
 class RerrHeader : public Header
 {
-public:
-  RerrHeader ();
-  static TypeId GetTypeId ();
-  TypeId GetInstanceTypeId () const override;
-  uint32_t GetSerializedSize () const override;
-  void Serialize (Buffer::Iterator start) const override;
-  uint32_t Deserialize (Buffer::Iterator start) override;
-  void Print (std::ostream &os) const override;
+  public:
+    /// constructor
+    RerrHeader();
 
-  void SetNoDelete (bool f);
-  bool GetNoDelete () const;
-  bool AddUnDestination (Ipv4Address dst, uint32_t seqno);
-  bool RemoveUnDestination (std::pair<Ipv4Address, uint32_t> & un);
-  bool IsEmpty () const { return m_unreachableDstSeqNo.empty (); }
-  uint8_t GetDestCount () const { return (uint8_t)m_unreachableDstSeqNo.size (); }
-  bool operator== (RerrHeader const & o) const;
+    /**
+     * @brief Get the type ID.
+     * @return the object TypeId
+     */
+    static TypeId GetTypeId();
+    TypeId GetInstanceTypeId() const override;
+    uint32_t GetSerializedSize() const override;
+    void Serialize(Buffer::Iterator i) const override;
+    uint32_t Deserialize(Buffer::Iterator start) override;
+    void Print(std::ostream& os) const override;
 
-private:
-  uint8_t m_flag;
-  uint8_t m_reserved;
-  std::map<Ipv4Address, uint32_t> m_unreachableDstSeqNo;
+    // No delete flag
+    /**
+     * @brief Set the no delete flag
+     * @param f the no delete flag
+     */
+    void SetNoDelete(bool f);
+    /**
+     * @brief Get the no delete flag
+     * @return the no delete flag
+     */
+    bool GetNoDelete() const;
+
+    /**
+     * @brief Add unreachable node address and its sequence number in RERR header
+     * @param dst unreachable IPv4 address
+     * @param seqNo unreachable sequence number
+     * @return false if we already added maximum possible number of unreachable destinations
+     */
+    bool AddUnDestination(Ipv4Address dst, uint32_t seqNo);
+    /**
+     * @brief Delete pair (address + sequence number) from REER header, if the number of unreachable
+     * destinations > 0
+     * @param un unreachable pair (address + sequence number)
+     * @return true on success
+     */
+    bool RemoveUnDestination(std::pair<Ipv4Address, uint32_t>& un);
+    /// Clear header
+    void Clear();
+
+    /**
+     * @returns number of unreachable destinations in RERR message
+     */
+    uint8_t GetDestCount() const
+    {
+        return (uint8_t)m_unreachableDstSeqNo.size();
+    }
+
+    /**
+     * @brief Comparison operator
+     * @param o RERR header to compare
+     * @return true if the RERR headers are equal
+     */
+    bool operator==(const RerrHeader& o) const;
+
+  private:
+    uint8_t m_flag;     ///< No delete flag
+    uint8_t m_reserved; ///< Not used (must be 0)
+
+    /// List of Unreachable destination: IP addresses and sequence numbers
+    std::map<Ipv4Address, uint32_t> m_unreachableDstSeqNo;
 };
 
-std::ostream & operator<< (std::ostream & os, RerrHeader const &);
+/**
+ * @brief Stream output operator
+ * @param os output stream
+ * @return updated stream
+ */
+std::ostream& operator<<(std::ostream& os, const RerrHeader&);
 
 } // namespace aomdv
 } // namespace ns3
 
-#endif /* AOMDV_PACKET_H */
+#endif /* AOMDVPACKET_H */

@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use this software or data, please cite the article below."
+title: "QS-QMAODV: queue-state-aware Q-learning multipath routing for flying ad hoc networks — ns-3 code, experiment design and data"
+authors:
+  - family-names: "Le"
+    given-names: "Trong Hien"
+  # - family-names: "<co-author>"
+  #   given-names: "<given name>"
+license: GPL-2.0-only
+repository-code: "https://github.com/Letronghien/qsqmaodv-fanet"
+version: "3.0.0"
+date-released: "2026-10-01"
+preferred-citation:
+  type: article
+  title: "<final article title>"
+  authors:
+    - family-names: "Le"
+      given-names: "Trong Hien"
+  journal: "Journal of Applied Data Sciences"
+  year: 2026

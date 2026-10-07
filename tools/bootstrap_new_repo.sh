@@ -29,7 +29,7 @@ git config --global user.email >/dev/null || { echo "set: git config --global us
 # 3. fresh repository
 git init -q -b main
 git add -A
-git commit -q -m "Initial commit: QS-QMAODV v2 on ns-3.48 (qs2maodv + baselines pmaodv/qmaodv from ns-3-nbq)"
+git commit -q -m "Initial commit: QS-QMAODV v2 on ns-3.48 (QS-QMAODV + baselines)"
 git remote add origin "$URL"
 echo "-> first commit: $(git log --oneline -1)"
 

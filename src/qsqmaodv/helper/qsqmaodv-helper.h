@@ -29,8 +29,8 @@
 namespace ns3
 {
 /**
- * \ingroup saqsqmaodv
- * \brief Helper class that adds SAQSQMAODV routing to nodes.
+ * \ingroup qsqmaodv
+ * \brief Helper class that adds QSQMAODV routing to nodes.
  */
 class QsqmaodvHelper : public Ipv4RoutingHelper
 {
@@ -52,7 +52,6 @@ class QsqmaodvHelper : public Ipv4RoutingHelper
      *
      * This method will be called by ns3::InternetStackHelper::Install
      *
-     * \todo support installing SAQSQMAODV on the subset of all available IP interfaces
      */
     Ptr<Ipv4RoutingProtocol> Create(Ptr<Node> node) const override;
     /**
@@ -69,14 +68,14 @@ class QsqmaodvHelper : public Ipv4RoutingHelper
      * should have previously been called by the user.
      *
      * \param stream first stream index to use
-     * \param c NodeContainer of the set of nodes for which SAQSQMAODV
+     * \param c NodeContainer of the set of nodes for which QSQMAODV
      *          should be modified to use a fixed stream
      * \return the number of stream indices assigned by this helper
      */
     int64_t AssignStreams(NodeContainer c, int64_t stream);
 
   private:
-    /** the factory to create SAQSQMAODV routing object */
+    /** the factory to create QSQMAODV routing object */
     ObjectFactory m_agentFactory;
 };
 

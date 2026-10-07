@@ -3,7 +3,7 @@
 #
 #   ~/qsqmaodv-repo/              <- this git repo (the only place you edit code)
 #   ~/qsqmaodv-fanet/ns-3-qsq/    <- private ns-3.48 tree used to build/run
-#        src/qs2maodv  -> ~/qsqmaodv-repo/src/qs2maodv   (symlink)
+#        src/qsqmaodv  -> ~/qsqmaodv-repo/src/qsqmaodv   (symlink; also qlaodv, aomdv)
 #        src/pmaodv    -> ~/qsqmaodv-repo/src/pmaodv     (symlink)
 #        src/qmaodv    -> ~/qsqmaodv-repo/src/qmaodv     (symlink)
 #        scratch/qsq-compare.cc -> ~/qsqmaodv-repo/scratch/qsq-compare.cc
@@ -17,7 +17,8 @@ set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 WORK=${WORK:-$HOME/qsqmaodv-fanet}
 NS3=${NS3:-$WORK/ns-3-qsq}
-PROFILE=${PROFILE:-release}           # same as ns-3-anbq / ns-3-nbq
+source "$REPO/tools/ns3_common.sh"   # QSQ_PROFILE (release), configure flags, helpers
+PROFILE=$QSQ_PROFILE
 JOBS=${JOBS:-$(nproc)}
 
 echo "repo : $REPO"
@@ -38,11 +39,15 @@ fi
 grep -qx "3.48" "$NS3/VERSION" || { echo "ERROR: $NS3 is not ns-3.48"; exit 1; }
 
 # 2. baselines present in the repo? ------------------------------------------
-for m in pmaodv qmaodv; do
+for m in aomdv mpaodv; do
   [[ -f "$REPO/src/$m/CMakeLists.txt" ]] || { echo "-> importing baselines"; bash "$REPO/tools/import_baselines.sh"; break; }
 done
 
 # 3. link repo -> ns-3 tree --------------------------------------------------
+# remove links left by modules/programs that no longer exist in the repo
+for l in "$NS3"/src/* "$NS3"/scratch/*; do
+  if [[ -L "$l" && ! -e "$l" ]]; then echo "   removing stale link $(basename "$l")"; rm -f "$l"; fi
+done
 MODULES="aodv;applications;energy;flow-monitor;internet;mobility;network;propagation;wifi"
 for d in "$REPO"/src/*/; do
   d=${d%/}; m=$(basename "$d")
@@ -63,14 +68,14 @@ python3 "$REPO/tools/check_guards.py" --fix="$(echo $REPO_MODS | tr ' ' ',')" "$
 
 # 5. configure + build ---------------------------------------------------------
 cd "$NS3"
-./ns3 configure --build-profile="$PROFILE" --disable-examples --disable-tests \
-      --disable-python-bindings --disable-werror --enable-modules="$MODULES"
+# shellcheck disable=SC2086
+./ns3 configure $QSQ_CONFIGURE_FLAGS --enable-modules="$MODULES"
 ./ns3 build -j "$JOBS"
 
 echo "NS3=$NS3" > "$REPO/.workspace"
 
 # 6. check that the baseline attributes used by qsq-compare exist -------------
-BIN=$(find "$NS3/build/scratch" -maxdepth 1 -type f -executable -name "*qsq-compare*" | head -1)
+BIN=$(qsq_binary "$NS3")
 export LD_LIBRARY_PATH="$NS3/build/lib:${LD_LIBRARY_PATH:-}"
 echo; echo "== attribute check (qsq-compare sets these on the baselines) =="
 check_attrs() {   # $1 = TypeId, rest = attribute names
@@ -86,7 +91,8 @@ check_attrs() {   # $1 = TypeId, rest = attribute names
     else echo "  MISSING $tid::$a"; fi
   done
 }
-check_attrs ns3::qmaodv::RoutingProtocol MaxPaths Alpha0 Gamma Epsilon0 RewardW1 RewardW2
-check_attrs ns3::pmaodv::RoutingProtocol MaxPaths Beta Lambda SelMode
-check_attrs ns3::qsqmaodv::RoutingProtocol MaxPaths Alpha0 Gamma Epsilon0 RewardW1 RewardW2 QueueRewardWeight FailurePenalty QueueAwareSelect AckSilenceDecay TrendEpsilon
+check_attrs ns3::mpaodv::RoutingProtocol Policy MaxPaths Alpha0 Gamma Epsilon0 RewardW1 RewardW2
+check_attrs ns3::aomdv::RoutingProtocol MaxPaths HelloInterval ActiveRouteTimeout
+check_attrs ns3::qsqmaodv::RoutingProtocol HopByHop QueueRewardWeight FailurePenalty QueueAwareSelect QueueDrivenExploration ExplorationFloor AckSilenceDecay QueueRefPackets
+check_attrs ns3::qlaodv::RoutingProtocol QlAlpha QlGamma QlEpsilon0 QlEpsilonMin QlEpsilonDecay QlMaxRoutes QlRrepWait
 echo; echo "Done. Next:  cd $REPO && make smoke"

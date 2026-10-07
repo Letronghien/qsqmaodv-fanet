@@ -2,9 +2,9 @@
 """
 check_guards.py — detect include-guard collisions between ns-3 modules.
 
-Modules cloned from one another (aodv -> aomdv -> pmaodv/qmaodv -> qs2maodv) often keep
+Modules cloned from one another (aodv -> aomdv -> pmaodv/qmaodv -> qsqmaodv, aodv -> qlaodv) often keep
 the original '#ifndef XXX_H' guards. A program that includes two such modules
-(qsq-compare includes aodv, pmaodv, qmaodv and qs2maodv) then silently skips one header
+(qsq-compare includes aodv, aomdv, pmaodv, qmaodv, qlaodv and qsqmaodv) then silently skips one header
 and fails with "RoutingTableEntry does not name a type".
 
 usage: python3 tools/check_guards.py [--fix=mod1,mod2] <ns-3 tree> <module> [<module> ...]

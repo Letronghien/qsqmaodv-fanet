@@ -15,17 +15,17 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  * Based on
- *      NS-2 SAQSQMAODV model developed by the CMU/MONARCH group and optimized and
+ *      NS-2 AODV model developed by the CMU/MONARCH group and optimized and
  *      tuned by Samir Das and Mahesh Marina, University of Cincinnati;
  *
- *      SAQSQMAODV-UU implementation by Erik Nordström of Uppsala University
- *      https://web.archive.org/web/20100527072022/http://core.it.uu.se/core/index.php/SAQSQMAODV-UU
+ *      AODV-UU implementation by Erik Nordström of Uppsala University
+ *      https://web.archive.org/web/20100527072022/http://core.it.uu.se/core/index.php/AODV-UU
  *
  * Authors: Elena Buchatskaia <borovkovaes@iitp.ru>
  *          Pavel Boyko <boyko@iitp.ru>
  */
-#ifndef SAQSQMAODVROUTINGPROTOCOL_H
-#define SAQSQMAODVROUTINGPROTOCOL_H
+#ifndef QSQMAODV_ROUTING_PROTOCOL_H
+#define QSQMAODV_ROUTING_PROTOCOL_H
 
 #include "qsqmaodv-dpd.h"
 #include "qsqmaodv-neighbor.h"
@@ -42,7 +42,8 @@
 #include "ns3/random-variable-stream.h"
 
 #include <map>
-#include <deque>
+#include <set>
+#include <tuple>
 
 namespace ns3
 {
@@ -55,9 +56,9 @@ enum WifiMacDropReason : uint8_t; // opaque enum declaration
 namespace qsqmaodv
 {
 /**
- * \ingroup saqsqmaodv
+ * \ingroup qsqmaodv
  *
- * \brief SAQSQMAODV routing protocol
+ * \brief Multipath AODV core of PMAODV and QMAODV
  */
 class RoutingProtocol : public Ipv4RoutingProtocol
 {
@@ -207,38 +208,46 @@ class RoutingProtocol : public Ipv4RoutingProtocol
      */
     int64_t AssignStreams(int64_t stream);
 
-    // ================= QS-QMAODV: run diagnostics ==========================
+    /// QS-QMAODV run diagnostics (read by the simulation program)
     struct QsStats
     {
-        uint64_t decisions{0};     ///< next-hop decisions (source + forwarders)
-        double   nodeQSum{0.0};    ///< sum of node-level MAC BE occupancy at decisions
-        double   nodeQMax{0.0};
-        uint64_t nodeQPos{0};      ///< decisions with node-level occupancy > 0
-        double   nhQSum{0.0};      ///< sum of chosen-next-hop occupancy q_n
-        uint64_t nhQPos{0};        ///< decisions with q_n > 0
-        uint64_t fbAck{0};         ///< MAC ACK feedbacks applied
-        uint64_t fbDrop{0};        ///< MAC drop feedbacks applied
-        uint64_t decayed{0};       ///< Q entries shrunk by ACK-silence decay
-        uint64_t trendBumps{0};    ///< trend-triggered epsilon bumps
+        uint64_t decisions{0};  ///< next-hop decisions for data packets (source + forwarders)
+        double nodeQSum{0.0};   ///< sum of node-level MAC BE occupancy at decisions
+        double nodeQMax{0.0};
+        uint64_t nodeQPos{0};   ///< decisions with node-level occupancy > 0
+        double nhQSum{0.0};     ///< sum of chosen-next-hop occupancy q_n
+        uint64_t nhQPos{0};     ///< decisions with q_n > 0
+        uint64_t fbAck{0};      ///< MAC ACK feedbacks applied
+        uint64_t fbDrop{0};     ///< MAC drop feedbacks applied
+        uint64_t decayed{0};    ///< Q entries shrunk by ACK-silence decay
     };
     const QsStats& GetQsStats() const { return m_qsStats; }
 
   protected:
     void DoInitialize() override;
-  /// SAQSQMAODV: setters
-  void SetMaxPaths(uint32_t mp);
-  uint32_t GetMaxPaths() const;
-  void SetSALearningParams(double alpha0, double gamma, double epsilon0);
-  void SetSARewardWeights(double w1, double w2, double w3, double w4);
-  void SetSAAdaptiveParams(double lambda, Time seqNoWindow,
-                           double lowEnergyThreshold, Time periodicInterval);
-  /// SAQSQMAODV: periodic adaptation tick (ε-decay + α-recompute + reward-weight update)
-  void PeriodicAdaptiveTick();
-  /// SAQSQMAODV: read residual energy fraction from BasicEnergySource
-  double GetEnergyFraction() const;
-
 
   private:
+    /**
+     * Set the maximum number of routes per destination.
+     * \param mp maximum number of routes
+     */
+    void SetMaxPaths(uint32_t mp);
+    /**
+     * \return the maximum number of routes per destination
+     */
+    uint32_t GetMaxPaths() const;
+    /// Periodic decay of the exploration rate.
+    void EpsilonDecayTick();
+    /**
+     * \param p packet
+     * \return true for routing control packets
+     */
+    bool IsControlPacket(Ptr<const Packet> p) const;
+    /**
+     * \param mpduPacket packet of an MPDU (starting with the LLC/SNAP header)
+     * \return true if the frame carries application data
+     */
+    static bool IsDataFrame(Ptr<const Packet> mpduPacket);
     /**
      * Notify that an MPDU was dropped.
      *
@@ -246,9 +255,16 @@ class RoutingProtocol : public Ipv4RoutingProtocol
      * \param mpdu the dropped MPDU
      */
     void NotifyTxError(WifiMacDropReason reason, Ptr<const WifiMpdu> mpdu);
-    /// STEP6: MPDU acknowledged by the next hop
+    /**
+     * Notify that an MPDU was acknowledged.
+     * \param mpdu the acknowledged MPDU
+     */
     void NotifyTxAcked(Ptr<const WifiMpdu> mpdu);
-    /// STEP6: credit the MAC outcome of a tagged data MPDU to Q(dst, nextHop)
+    /**
+     * Q-update from the MAC outcome of a data MPDU.
+     * \param mpdu the MPDU
+     * \param acked true if acknowledged
+     */
     void MacFeedback(Ptr<const WifiMpdu> mpdu, bool acked);
 
     // Protocol parameters.
@@ -309,77 +325,46 @@ class RoutingProtocol : public Ipv4RoutingProtocol
 
     /// Routing table
     RoutingTable m_routingTable;
-  /// SAQSQMAODV: Self-adaptive Q-table
-  QTable m_qtable;
-  /// STEP4: call QTable::OnRouteError() on RERR / link break
-  bool m_useRerrBump{true};
-  /// STEP5: epsilon-greedy next-hop selection at every forwarding node
-  bool m_hopByHop{true};
-  bool m_tagsOnAir{false}; ///< STEP13b
-  /// STEP7: next-hop selection policy: "QLearning" (QSQMAODV) or "Probabilistic" (PMAODV)
-  std::string m_policy{"QLearning"};
-  /// STEP6: learn from real MAC outcome (AckedMpdu / DroppedMpdu) instead of
-  /// the neighbour-freshness proxy
-  bool m_useMacFeedback{true};
-  double m_delayRef{0.010}; ///< STEP6: delay normalisation constant (s)
-  /// SAQSQMAODV: max paths
-  uint32_t m_maxPaths{3};
-  /// SAQSQMAODV: initial Q-learning params (before adaptation)
-  double m_alpha0{0.5};
-  double m_gamma{0.9};
-  double m_epsilon0{0.5};   // STEP3: ICIT value
-  double m_w1{0.6};   // STEP3: ICIT value
-  double m_w2{0.4};
-  double m_w3{0.0};   // STEP3: ICIT has no energy term
-  double m_w4{0.2};
-  /// STEP3: adaptive-controller switches (QSQMAODV-ICIT baseline: all false)
-  bool m_adaptEpsilon{false};
-  bool m_adaptAlpha{false};
-  bool m_adaptReward{false};
-  double      m_queueHighThresh{0.7};  // EA: queue high threshold
-  double      m_queueLowThresh{0.3};   // EA: queue low threshold
-  /// SAQSQMAODV: adaptive controller params
-  double      m_muTdError{0.10};    // EA: EMA smoothing mu
-  double      m_kappaTdError{0.50};  // EA: saturation kappa
-  Time   m_seqNoWindow{Seconds(5.0)};
-  double m_lowEnergyThreshold{0.20};
-  Time   m_periodicAdaptInterval{Seconds(10.0)};
-  EventId m_periodicAdaptEvent;
+    /// Multipath Q-table
+    QTable m_qtable;
+    std::string m_policy{"QLearning"};         ///< next-hop selection: QLearning or Probabilistic
+    uint32_t m_maxPaths{3};                    ///< maximum number of routes per destination
+    double m_alpha0{0.5};                      ///< (initial) learning rate
+    double m_gamma{0.9};                       ///< discount factor
+    double m_epsilon0{0.5};                    ///< initial exploration rate
+    double m_w1{0.6};                          ///< reward weight of the MAC ACK
+    double m_w2{0.4};                          ///< reward weight of the one-hop delay
+    Time m_epsilonDecayInterval{Seconds(10.0)}; ///< period of the exploration decay
+    EventId m_epsilonDecayEvent;              ///< exploration decay tick
 
-  // ================= QS-QMAODV: queue-state extensions =====================
-  // Every feature can be switched off; all off == QMAODV (same code path).
-  double m_qsWq{0.10};            ///< QueueRewardWeight
-  bool   m_qsAdaptiveWq{true};    ///< AdaptiveQueueWeight
-  double m_qsWqMax{0.40};
-  double m_qsWqKappa{0.20};
-  double m_qsFailPenalty{0.5};    ///< FailurePenalty
-  bool   m_qsQueueSelect{true};   ///< QueueAwareSelect
-  double m_qsBeta{0.5};           ///< QueueSelectBeta
-  bool   m_qsDecay{true};         ///< AckSilenceDecay
-  Time   m_qsDecayThreshold{Seconds(15)};
-  double m_qsDecayFactor{0.92};
-  uint32_t m_qsDecayMinTx{3};
-  Time   m_qsDecayInterval{Seconds(10)};
-  bool   m_qsTrend{true};         ///< TrendEpsilon
-  Time   m_qsTrendInterval{Seconds(1)};
-  double m_qsTrendDelta{0.05};
-  uint32_t m_qsTrendWindow{3};
-  double m_qsTrendBump{0.10};
-  double m_qsTrendCap{0.50};
-  double m_qsNhQueueRef{20.0};    ///< QueueRefPackets: packets that count as q = 1
-  EventId m_qsDecayEvent;
-  EventId m_qsTrendEvent;
-  std::deque<double> m_qsTrendHist;
-  QsStats m_qsStats;
-  Ptr<WifiMacQueue> GetBeQueue() const;
-  bool   IsQosMac() const;
-  bool   LookupMac(Ipv4Address ip, Mac48Address& mac) const;
-  double GetNodeQueueOccupancy() const;                 ///< |Q_BE| / Q_max
-  double GetNextHopQueueOccupancy(Ipv4Address nh) const; ///< |Q_BE(nh)| / ref
-  void   QsDecayTick();
-  void   QsTrendTick();
-  /// common bookkeeping at every next-hop decision; returns q_n of the chosen hop
-  double QsOnDecision(Ipv4Address nextHop);
+    // ================= QS-QMAODV: queue-state extensions =====================
+    // Every feature is an attribute; HopByHop=true and all queue features off == QMAODV.
+    bool m_hopByHop{false};          ///< HopByHop (QMAODV: true)
+    double m_qsWq{0.10};             ///< QueueRewardWeight
+    double m_qsFailPenalty{0.5};     ///< FailurePenalty
+    bool m_qsQueueSelect{true};      ///< QueueAwareSelect
+    double m_qsBeta{0.5};            ///< QueueSelectBeta
+    bool m_qsQueueExplore{true};     ///< QueueDrivenExploration
+    double m_qsExploreFloor{0.01};   ///< ExplorationFloor
+    bool m_qsDecay{true};            ///< AckSilenceDecay
+    Time m_qsDecayThreshold{Seconds(15)};
+    double m_qsDecayFactor{0.92};
+    uint32_t m_qsDecayMinTx{3};
+    Time m_qsDecayInterval{Seconds(10)};
+    double m_qsQueueRef{20.0};       ///< QueueRefPackets (0 = MAC queue MaxSize)
+    EventId m_qsDecayEvent;
+    QsStats m_qsStats;
+    Ptr<WifiMacQueue> GetBeQueue() const;
+    bool IsQosMac() const;
+    bool LookupMac(Ipv4Address ip, Mac48Address& mac) const;
+    double GetNodeQueueOccupancy() const;                 ///< |Q_BE| / Q_ref
+    double GetNextHopQueueOccupancy(Ipv4Address nh) const; ///< |Q_BE(nh)| / Q_ref
+    double QsOnDecision(Ipv4Address nextHop);             ///< diagnostics; returns q_n
+    void QsDecayTick();
+    /// destination replies sent per (origin, RREQ id)
+    std::map<std::pair<uint32_t, uint32_t>, uint32_t> m_mcastRrepSent;
+    /// RREPs already forwarded per (origin, destination, destination sequence number)
+    std::set<std::tuple<uint32_t, uint32_t, uint32_t>> m_rrepForwarded;
     /// A "drop-front" queue used by the routing layer to buffer packets to which it does not have a
     /// route.
     RequestQueue m_queue;
@@ -491,7 +476,7 @@ class RoutingProtocol : public Ipv4RoutingProtocol
      * Receive and process control packet
      * \param socket input socket
      */
-    void RecvSaqsqmaodv(Ptr<Socket> socket);
+    void RecvQsqmaodv(Ptr<Socket> socket);
     /**
      * Receive RREQ
      * \param p packet
@@ -615,4 +600,4 @@ class RoutingProtocol : public Ipv4RoutingProtocol
 } // namespace qsqmaodv
 } // namespace ns3
 
-#endif /* SAQSQMAODVROUTINGPROTOCOL_H */
+#endif /* QSQMAODV_ROUTING_PROTOCOL_H */

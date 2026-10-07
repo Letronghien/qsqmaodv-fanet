@@ -15,11 +15,11 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  * Based on
- *      NS-2 SAQSQMAODV model developed by the CMU/MONARCH group and optimized and
+ *      NS-2 AODV model developed by the CMU/MONARCH group and optimized and
  *      tuned by Samir Das and Mahesh Marina, University of Cincinnati;
  *
- *      SAQSQMAODV-UU implementation by Erik Nordström of Uppsala University
- *      https://web.archive.org/web/20100527072022/http://core.it.uu.se/core/index.php/SAQSQMAODV-UU
+ *      AODV-UU implementation by Erik Nordström of Uppsala University
+ *      https://web.archive.org/web/20100527072022/http://core.it.uu.se/core/index.php/AODV-UU
  *
  * Authors: Elena Buchatskaia <borovkovaes@iitp.ru>
  *          Pavel Boyko <boyko@iitp.ru>

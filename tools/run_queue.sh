@@ -8,7 +8,7 @@ set -u
 PROJ=$(cd "$(dirname "$0")/.." && pwd); cd "$PROJ"
 OUTDIR=${OUTDIR:-$PROJ/data/v2}; mkdir -p "$OUTDIR/logs"
 PY=${PY:-python3}; [[ -x "$PROJ/.venv/bin/python" ]] && PY="$PROJ/.venv/bin/python"
-PROTOS=${PROTOS:-AODV,PMAODV,QMAODV,QSQMAODV}
+PROTOS=${PROTOS:-AODV,AOMDV,PMAODV,QMAODV,QLAODV,QSQMAODV}
 [[ $# -gt 0 ]] && echo "$*" > "$OUTDIR/QUEUE"
 read -r -a SETS < "$OUTDIR/QUEUE"
 for s in "${SETS[@]}"; do

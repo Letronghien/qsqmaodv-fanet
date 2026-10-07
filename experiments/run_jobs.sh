@@ -30,7 +30,8 @@ flock -n 8 || { echo "another runner is already using $OUTDIR (see: tmux ls)"; e
 
 if [[ -z "${BIN:-}" ]]; then
   ( cd "$NS3" && ./ns3 build qsq-compare >/dev/null ) || { echo "build failed"; exit 1; }
-  BIN=$(find "$NS3/build/scratch" -maxdepth 1 -type f -executable -name "*qsq-compare*" | head -1)
+  source "$PROJ/tools/ns3_common.sh"
+  BIN=$(qsq_binary "$NS3")
 fi
 [[ -x "$BIN" ]] || { echo "binary not found"; exit 1; }
 export BIN RUNS LOGS JOB_TIMEOUT LD_LIBRARY_PATH="$NS3/build/lib:${LD_LIBRARY_PATH:-}"

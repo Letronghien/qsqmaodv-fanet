@@ -15,22 +15,25 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  * Based on
- *      NS-2 SAQSQMAODV model developed by the CMU/MONARCH group and optimized and
+ *      NS-2 AODV model developed by the CMU/MONARCH group and optimized and
  *      tuned by Samir Das and Mahesh Marina, University of Cincinnati;
  *
- *      SAQSQMAODV-UU implementation by Erik Nordström of Uppsala University
- *      https://web.archive.org/web/20100527072022/http://core.it.uu.se/core/index.php/SAQSQMAODV-UU
+ *      AODV-UU implementation by Erik Nordström of Uppsala University
+ *      https://web.archive.org/web/20100527072022/http://core.it.uu.se/core/index.php/AODV-UU
  *
  * Authors: Elena Buchatskaia <borovkovaes@iitp.ru>
  *          Pavel Boyko <boyko@iitp.ru>
  */
-// QS: templates that use NS_LOG must be included before NS_LOG_APPEND_CONTEXT
-#include "ns3/wifi-mac.h"
-#include "ns3/wifi-mac-queue.h"
-#include "ns3/wifi-mac-queue-container.h"
+// QS-QMAODV: Wi-Fi queue headers contain templates that log; include them before the
+// node-context logging macro below.
 #include "ns3/arp-cache.h"
+#include "ns3/ipv4-l3-protocol.h"
 #include "ns3/mac48-address.h"
+#include "ns3/wifi-mac-queue-container.h"
+#include "ns3/wifi-mac-queue.h"
+#include "ns3/wifi-mac.h"
 
+#undef NS_LOG_APPEND_CONTEXT
 #define NS_LOG_APPEND_CONTEXT                                                                      \
     if (m_ipv4)                                                                                    \
     {                                                                                              \
@@ -39,11 +42,11 @@
 
 #include "qsqmaodv-routing-protocol.h"
 
+#include "ns3/llc-snap-header.h"
+
 #include "ns3/adhoc-wifi-mac.h"
 #include "ns3/boolean.h"
 #include "ns3/double.h"
-#include "ns3/energy-source-container.h"
-#include "ns3/basic-energy-source.h"
 #include "ns3/inet-socket-address.h"
 #include "ns3/log.h"
 #include "ns3/pointer.h"
@@ -57,6 +60,7 @@
 #include "ns3/wifi-net-device.h"
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
 
 namespace ns3
@@ -68,12 +72,12 @@ namespace qsqmaodv
 {
 NS_OBJECT_ENSURE_REGISTERED(RoutingProtocol);
 
-/// UDP Port for SAQSQMAODV control traffic
+/// UDP Port for QSQMAODV control traffic
 const uint32_t RoutingProtocol::QSQMAODV_PORT = 654;
 
 /**
- * \ingroup saqsqmaodv
- * \brief Tag used by SAQSQMAODV implementation
+ * \ingroup qsqmaodv
+ * \brief Tag used by QSQMAODV implementation
  */
 class DeferredRouteOutputTag : public Tag
 {
@@ -152,9 +156,8 @@ class DeferredRouteOutputTag : public Tag
 NS_OBJECT_ENSURE_REGISTERED(DeferredRouteOutputTag);
 
 /**
- * \brief STEP5: carries the IPv4 address of the node that transmitted the data
- * packet on the previous hop (information normally available from the MAC
- * header). Used to avoid sending a packet straight back to the previous hop.
+ * \ingroup qsqmaodv
+ * \brief Address of the node that transmitted the packet on the previous hop.
  */
 class PrevHopTag : public Tag
 {
@@ -187,19 +190,18 @@ class PrevHopTag : public Tag
 NS_OBJECT_ENSURE_REGISTERED(PrevHopTag);
 
 /**
- * \brief STEP6: attached to a data packet when this node chooses its next hop.
- * Records (destination, chosen next hop, decision time) so that the MAC-layer
- * outcome (AckedMpdu / DroppedMpdu) can be credited to the right Q(s,a).
+ * \ingroup qsqmaodv
+ * \brief (destination, chosen next hop, decision time) of a data packet, used to credit the
+ * MAC outcome to Q(destination, next hop).
  */
 class QFeedbackTag : public Tag
 {
   public:
-    QFeedbackTag(Ipv4Address dst = Ipv4Address(), Ipv4Address nh = Ipv4Address(), Time t = Seconds(0),
-                 double q = 0.0)
+    QFeedbackTag(Ipv4Address dst = Ipv4Address(), Ipv4Address nh = Ipv4Address(), Time t = Seconds(0))
         : m_dst(dst),
           m_nh(nh),
           m_t(t),
-          m_q(q)
+          m_q(0.0)
     {
     }
 
@@ -235,7 +237,9 @@ class QFeedbackTag : public Tag
     Ipv4Address GetDst() const { return m_dst; }
     Ipv4Address GetNextHop() const { return m_nh; }
     Time GetTime() const { return m_t; }
-    double GetQ() const { return m_q; }   ///< QS: q_n of the chosen hop at decision time
+    /// QS-QMAODV: occupancy q_n of the chosen next hop when the decision was made
+    double GetQ() const { return m_q; }
+    void SetQ(double q) { m_q = q; }
 
   private:
     Ipv4Address m_dst;
@@ -296,190 +300,118 @@ RoutingProtocol::GetTypeId()
             .SetParent<Ipv4RoutingProtocol>()
             .SetGroupName("Qsqmaodv")
             .AddConstructor<RoutingProtocol>()
-            .AddAttribute("MaxPaths", "Maximum routes per destination",
+            .AddAttribute("Policy",
+                          "Next-hop selection: QLearning (QMAODV) or Probabilistic "
+                          "(PMAODV, p proportional to 1/HopCount)",
+                          StringValue("QLearning"),
+                          MakeStringAccessor(&RoutingProtocol::m_policy),
+                          MakeStringChecker())
+            .AddAttribute("MaxPaths",
+                          "Maximum number of routes per destination",
                           UintegerValue(3),
                           MakeUintegerAccessor(&RoutingProtocol::SetMaxPaths,
                                                &RoutingProtocol::GetMaxPaths),
                           MakeUintegerChecker<uint32_t>(1))
-            .AddAttribute("Alpha0", "Initial Q-learning rate (will be adapted)",
+            .AddAttribute("Alpha0",
+                          "Learning rate",
                           DoubleValue(0.5),
                           MakeDoubleAccessor(&RoutingProtocol::m_alpha0),
                           MakeDoubleChecker<double>(0.0, 1.0))
-            .AddAttribute("Gamma", "Q-learning discount factor",
+            .AddAttribute("Gamma",
+                          "Discount factor",
                           DoubleValue(0.9),
                           MakeDoubleAccessor(&RoutingProtocol::m_gamma),
                           MakeDoubleChecker<double>(0.0, 1.0))
-            .AddAttribute("Epsilon0", "Initial ε (ICIT QSQMAODV: 0.5)",
+            .AddAttribute("Epsilon0",
+                          "Initial exploration rate",
                           DoubleValue(0.5),
                           MakeDoubleAccessor(&RoutingProtocol::m_epsilon0),
                           MakeDoubleChecker<double>(0.0, 1.0))
-            .AddAttribute("RewardW1", "Reward weight for ACK_success (ICIT: 0.6)",
+            .AddAttribute("RewardW1",
+                          "Reward weight of the MAC acknowledgement",
                           DoubleValue(0.6),
                           MakeDoubleAccessor(&RoutingProtocol::m_w1),
                           MakeDoubleChecker<double>())
-            .AddAttribute("RewardW2", "Reward weight for 1/(delay+1)",
+            .AddAttribute("RewardW2",
+                          "Reward weight of 1/(1 + one-hop delay in ms)",
                           DoubleValue(0.4),
                           MakeDoubleAccessor(&RoutingProtocol::m_w2),
                           MakeDoubleChecker<double>())
-            .AddAttribute("RewardW3", "Reward weight for Energy_residual (ICIT: 0)",
-                          DoubleValue(0.0),
-                          MakeDoubleAccessor(&RoutingProtocol::m_w3),
-                          MakeDoubleChecker<double>())
-            .AddAttribute("RewardW4",
-                    "Reward weight for 1/(queue+1) (w4 new)",
-                    DoubleValue(0.2),
-                    MakeDoubleAccessor(&RoutingProtocol::m_w4),
-                    MakeDoubleChecker<double>())
-        .AddAttribute("MuTdError",
-                    "EMA smoothing factor μ for TD-error adaptive α (EA-QSQMAODV §4.4)",
-                    DoubleValue(0.10),
-                    MakeDoubleAccessor(&RoutingProtocol::m_muTdError),
-                    MakeDoubleChecker<double>(0.0, 1.0))
-        .AddAttribute("KappaTdError",
-                    "Saturation constant κ in rational α formula (EA-QSQMAODV §4.4)",
-                    DoubleValue(0.50),
-                    MakeDoubleAccessor(&RoutingProtocol::m_kappaTdError),
-                    MakeDoubleChecker<double>(0.0))
-            .AddAttribute("SeqNoWindow", "Window length for Δ_Seq counting",
-                          TimeValue(Seconds(5.0)),
-                          MakeTimeAccessor(&RoutingProtocol::m_seqNoWindow),
-                          MakeTimeChecker())
-            .AddAttribute("LowEnergyThreshold", "Energy fraction triggering low-power weights",
-                          DoubleValue(0.20),
-                          MakeDoubleAccessor(&RoutingProtocol::m_lowEnergyThreshold),
-                          MakeDoubleChecker<double>(0.0, 1.0))
-            .AddAttribute("AdaptiveEpsilon",
-                          "STEP3: RERR bump + floor 0.1 (true, SA) or plain decay to 0 (false, ICIT)",
-                          BooleanValue(false),
-                          MakeBooleanAccessor(&RoutingProtocol::m_adaptEpsilon),
-                          MakeBooleanChecker())
-            .AddAttribute("AdaptiveAlpha",
-                          "STEP3: alpha_t from SeqNo dynamics (true, SA) or fixed Alpha0 (false, ICIT)",
-                          BooleanValue(false),
-                          MakeBooleanAccessor(&RoutingProtocol::m_adaptAlpha),
-                          MakeBooleanChecker())
-            .AddAttribute("AdaptiveReward",
-                          "STEP3: energy-driven reward weights (true, SA) or fixed weights (false, ICIT)",
-                          BooleanValue(false),
-                          MakeBooleanAccessor(&RoutingProtocol::m_adaptReward),
-                          MakeBooleanChecker())
-            .AddAttribute("Policy",
-                          "STEP7: next-hop selection policy: QLearning (QSQMAODV, epsilon-greedy "
-                          "on Q) or Probabilistic (PMAODV, p proportional to 1/HopCount)",
-                          StringValue("QLearning"),
-                          MakeStringAccessor(&RoutingProtocol::m_policy),
-                          MakeStringChecker())
-            .AddAttribute("UseMacFeedback",
-                          "STEP6: reward from the real MAC outcome (AckedMpdu/DroppedMpdu) and "
-                          "measured one-hop delay (true) or the neighbour-freshness proxy (false)",
-                          BooleanValue(true),
-                          MakeBooleanAccessor(&RoutingProtocol::m_useMacFeedback),
-                          MakeBooleanChecker())
-            .AddAttribute("DelayRef",
-                          "STEP6: delay normalisation constant d_ref in 1/(1 + delay/d_ref) (s)",
-                          DoubleValue(0.010),
-                          MakeDoubleAccessor(&RoutingProtocol::m_delayRef),
-                          MakeDoubleChecker<double>(0.0))
+            // ================= QS-QMAODV attributes ===================================
             .AddAttribute("HopByHop",
-                          "STEP5: epsilon-greedy next-hop selection at every forwarding node "
-                          "(true) or only at the source (false, pre-fix behaviour)",
-                          BooleanValue(true),
+                          "Next-hop learning at every forwarding node (true, QMAODV) or at the "
+                          "source only (false, QS-QMAODV: intermediate nodes keep the AODV route)",
+                          BooleanValue(false),
                           MakeBooleanAccessor(&RoutingProtocol::m_hopByHop),
                           MakeBooleanChecker())
-            .AddAttribute("TagsOnAir",
-                          "STEP13b: pad packets with the bytes that the packet tags would occupy on air "
-                          "(previous hop on data, energy/values on control). false = ns-3 tags only",
-                          BooleanValue(false),
-                          MakeBooleanAccessor(&RoutingProtocol::m_tagsOnAir),
-                          MakeBooleanChecker())
-            .AddAttribute("UseRerrBump",
-                          "STEP4: raise epsilon on RERR / link break (paper Sec. 4.2); "
-                          "false reproduces the pre-fix behaviour",
+            .AddAttribute("QueueRewardWeight",
+                          "QS: fixed weight wq of the queue term wq*ACK*(1-q_n) (0 = QMAODV reward)",
+                          DoubleValue(0.10),
+                          MakeDoubleAccessor(&RoutingProtocol::m_qsWq),
+                          MakeDoubleChecker<double>(0.0, 1.0))
+            .AddAttribute("FailurePenalty",
+                          "QS: subtracted from the reward when the MAC drops the frame (0 = QMAODV)",
+                          DoubleValue(0.5),
+                          MakeDoubleAccessor(&RoutingProtocol::m_qsFailPenalty),
+                          MakeDoubleChecker<double>(0.0))
+            .AddAttribute("QueueAwareSelect",
+                          "QS: exploitation score Q - beta*q_n*max|Q| (false = argmax Q)",
                           BooleanValue(true),
-                          MakeBooleanAccessor(&RoutingProtocol::m_useRerrBump),
+                          MakeBooleanAccessor(&RoutingProtocol::m_qsQueueSelect),
                           MakeBooleanChecker())
-            .AddAttribute("PeriodicAdaptInterval", "Period for ε-decay + α recompute + reward-weight update",
-                          TimeValue(Seconds(10.0)),
-                          MakeTimeAccessor(&RoutingProtocol::m_periodicAdaptInterval),
+            .AddAttribute("QueueSelectBeta",
+                          "QS: beta of the queue-aware score",
+                          DoubleValue(0.5),
+                          MakeDoubleAccessor(&RoutingProtocol::m_qsBeta),
+                          MakeDoubleChecker<double>(0.0))
+            .AddAttribute("QueueDrivenExploration",
+                          "QS: exploration probability = floor + (epsilon - floor) * q of the "
+                          "greedy next hop (false = QMAODV epsilon-greedy)",
+                          BooleanValue(true),
+                          MakeBooleanAccessor(&RoutingProtocol::m_qsQueueExplore),
+                          MakeBooleanChecker())
+            .AddAttribute("ExplorationFloor",
+                          "QS: exploration probability with an empty queue",
+                          DoubleValue(0.01),
+                          MakeDoubleAccessor(&RoutingProtocol::m_qsExploreFloor),
+                          MakeDoubleChecker<double>(0.0, 1.0))
+            .AddAttribute("AckSilenceDecay",
+                          "QS: shrink positive Q of pairs without MAC ACK for AckSilenceThreshold",
+                          BooleanValue(true),
+                          MakeBooleanAccessor(&RoutingProtocol::m_qsDecay),
+                          MakeBooleanChecker())
+            .AddAttribute("AckSilenceThreshold",
+                          "QS: silence threshold tau",
+                          TimeValue(Seconds(15)),
+                          MakeTimeAccessor(&RoutingProtocol::m_qsDecayThreshold),
                           MakeTimeChecker())
-            .AddAttribute("QueueHighThreshold",
-                    "Queue occupancy fraction for high-load w4 penalty",
-                    DoubleValue(0.7),
-                    MakeDoubleAccessor(&RoutingProtocol::m_queueHighThresh),
-                    MakeDoubleChecker<double>())
-        .AddAttribute("QueueLowThreshold",
-                    "Queue occupancy fraction for low-load w4 reward",
-                    DoubleValue(0.3),
-                    MakeDoubleAccessor(&RoutingProtocol::m_queueLowThresh),
-                    MakeDoubleChecker<double>())
-        // ================= QS-QMAODV attributes ===================================
-        .AddAttribute("QueueRewardWeight",
-                      "QS: weight wq of the queue term wq*ACK*(1-q_n) (0 = off, QMAODV reward)",
-                      DoubleValue(0.10), MakeDoubleAccessor(&RoutingProtocol::m_qsWq),
-                      MakeDoubleChecker<double>(0.0, 1.0))
-        .AddAttribute("AdaptiveQueueWeight",
-                      "QS: wq_eff = min(QueueWeightMax, wq + QueueWeightKappa*q_n)",
-                      BooleanValue(true), MakeBooleanAccessor(&RoutingProtocol::m_qsAdaptiveWq),
-                      MakeBooleanChecker())
-        .AddAttribute("QueueWeightMax", "QS: upper bound of wq_eff",
-                      DoubleValue(0.40), MakeDoubleAccessor(&RoutingProtocol::m_qsWqMax),
-                      MakeDoubleChecker<double>(0.0, 1.0))
-        .AddAttribute("QueueWeightKappa", "QS: slope of wq_eff in q_n",
-                      DoubleValue(0.20), MakeDoubleAccessor(&RoutingProtocol::m_qsWqKappa),
-                      MakeDoubleChecker<double>(0.0))
-        .AddAttribute("FailurePenalty",
-                      "QS: subtracted from the reward when the MAC drops the frame (0 = QMAODV)",
-                      DoubleValue(0.5), MakeDoubleAccessor(&RoutingProtocol::m_qsFailPenalty),
-                      MakeDoubleChecker<double>(0.0))
-        .AddAttribute("QueueAwareSelect",
-                      "QS: exploitation score Q - beta*q_n*max|Q| (false = argmax Q, QMAODV)",
-                      BooleanValue(true), MakeBooleanAccessor(&RoutingProtocol::m_qsQueueSelect),
-                      MakeBooleanChecker())
-        .AddAttribute("QueueSelectBeta", "QS: beta of the queue-aware score",
-                      DoubleValue(0.5), MakeDoubleAccessor(&RoutingProtocol::m_qsBeta),
-                      MakeDoubleChecker<double>(0.0))
-        .AddAttribute("AckSilenceDecay",
-                      "QS: shrink positive Q of pairs without MAC ACK for AckSilenceThreshold",
-                      BooleanValue(true), MakeBooleanAccessor(&RoutingProtocol::m_qsDecay),
-                      MakeBooleanChecker())
-        .AddAttribute("AckSilenceThreshold", "QS: silence threshold tau",
-                      TimeValue(Seconds(15)), MakeTimeAccessor(&RoutingProtocol::m_qsDecayThreshold),
-                      MakeTimeChecker())
-        .AddAttribute("DecayFactor", "QS: multiplicative decay of positive Q",
-                      DoubleValue(0.92), MakeDoubleAccessor(&RoutingProtocol::m_qsDecayFactor),
-                      MakeDoubleChecker<double>(0.0, 1.0))
-        .AddAttribute("DecayMinTx", "QS: minimum transmissions before a pair can be decayed",
-                      UintegerValue(3), MakeUintegerAccessor(&RoutingProtocol::m_qsDecayMinTx),
-                      MakeUintegerChecker<uint32_t>())
-        .AddAttribute("DecayInterval", "QS: period of the decay pass",
-                      TimeValue(Seconds(10)), MakeTimeAccessor(&RoutingProtocol::m_qsDecayInterval),
-                      MakeTimeChecker())
-        .AddAttribute("TrendEpsilon",
-                      "QS: raise epsilon when node MAC occupancy rises in TrendWindow consecutive samples",
-                      BooleanValue(true), MakeBooleanAccessor(&RoutingProtocol::m_qsTrend),
-                      MakeBooleanChecker())
-        .AddAttribute("TrendInterval", "QS: sampling period of node MAC occupancy",
-                      TimeValue(Seconds(1)), MakeTimeAccessor(&RoutingProtocol::m_qsTrendInterval),
-                      MakeTimeChecker())
-        .AddAttribute("TrendDelta", "QS: minimum rise per sample",
-                      DoubleValue(0.05), MakeDoubleAccessor(&RoutingProtocol::m_qsTrendDelta),
-                      MakeDoubleChecker<double>(0.0))
-        .AddAttribute("TrendWindow", "QS: consecutive rising samples required",
-                      UintegerValue(3), MakeUintegerAccessor(&RoutingProtocol::m_qsTrendWindow),
-                      MakeUintegerChecker<uint32_t>(2))
-        .AddAttribute("TrendBump", "QS: epsilon increment on a rising trend",
-                      DoubleValue(0.10), MakeDoubleAccessor(&RoutingProtocol::m_qsTrendBump),
-                      MakeDoubleChecker<double>(0.0, 1.0))
-        .AddAttribute("TrendCap", "QS: epsilon ceiling for trend bumps",
-                      DoubleValue(0.50), MakeDoubleAccessor(&RoutingProtocol::m_qsTrendCap),
-                      MakeDoubleChecker<double>(0.0, 1.0))
-        .AddAttribute("QueueRefPackets",
-                      "QS: queue length (packets) that counts as 'full' (q = 1) for both the "
-                      "next-hop occupancy q_n and the node occupancy used by the trend detector; "
-                      "0 = MAC queue MaxSize (500 by default, which makes q almost always ~0)",
-                      DoubleValue(20.0), MakeDoubleAccessor(&RoutingProtocol::m_qsNhQueueRef),
-                      MakeDoubleChecker<double>(0.0))
-        .AddAttribute("HelloInterval",
+            .AddAttribute("DecayFactor",
+                          "QS: multiplicative decay of positive Q",
+                          DoubleValue(0.92),
+                          MakeDoubleAccessor(&RoutingProtocol::m_qsDecayFactor),
+                          MakeDoubleChecker<double>(0.0, 1.0))
+            .AddAttribute("DecayMinTx",
+                          "QS: minimum transmissions before a pair can be decayed",
+                          UintegerValue(3),
+                          MakeUintegerAccessor(&RoutingProtocol::m_qsDecayMinTx),
+                          MakeUintegerChecker<uint32_t>())
+            .AddAttribute("DecayInterval",
+                          "QS: period of the decay pass",
+                          TimeValue(Seconds(10)),
+                          MakeTimeAccessor(&RoutingProtocol::m_qsDecayInterval),
+                          MakeTimeChecker())
+            .AddAttribute("QueueRefPackets",
+                          "QS: queue length (packets) counted as full (q = 1); "
+                          "0 = MAC queue MaxSize",
+                          DoubleValue(20.0),
+                          MakeDoubleAccessor(&RoutingProtocol::m_qsQueueRef),
+                          MakeDoubleChecker<double>(0.0))
+            .AddAttribute("EpsilonDecayInterval",
+                          "Period of the exploration decay",
+                          TimeValue(Seconds(10.0)),
+                          MakeTimeAccessor(&RoutingProtocol::m_epsilonDecayInterval),
+                          MakeTimeChecker())
+            .AddAttribute("HelloInterval",
                           "HELLO messages emission interval.",
                           TimeValue(Seconds(1)),
                           MakeTimeAccessor(&RoutingProtocol::m_helloInterval),
@@ -650,8 +582,6 @@ void
 RoutingProtocol::DoDispose()
 {
     m_qsDecayEvent.Cancel();
-    m_qsTrendEvent.Cancel();
-    m_periodicAdaptEvent.Cancel();
     m_ipv4 = nullptr;
     for (auto iter = m_socketAddresses.begin(); iter != m_socketAddresses.end(); iter++)
     {
@@ -674,7 +604,7 @@ RoutingProtocol::PrintRoutingTable(Ptr<OutputStreamWrapper> stream, Time::Unit u
     *stream->GetStream() << "Node: " << m_ipv4->GetObject<Node>()->GetId()
                          << "; Time: " << Now().As(unit)
                          << ", Local time: " << m_ipv4->GetObject<Node>()->GetLocalTime().As(unit)
-                         << ", SAQSQMAODV Routing table" << std::endl;
+                         << ", QSQMAODV Routing table" << std::endl;
 
     m_routingTable.Print(stream, unit);
     *stream->GetStream() << std::endl;
@@ -691,41 +621,35 @@ RoutingProtocol::AssignStreams(int64_t stream)
 void
 RoutingProtocol::Start()
 {
-  // SAQSQMAODV: push initial params + start adaptive controller
-  m_qtable.SetMaxPaths(m_maxPaths);
-  m_qtable.SetLearningParameters(m_alpha0, m_gamma, m_epsilon0);
-  m_qtable.SetRewardWeights(m_w1, m_w2, m_w3);
-  m_qtable.SetTdErrorParams(m_muTdError, m_kappaTdError);
-  m_qtable.SetAdaptiveFlags(m_adaptEpsilon, m_adaptAlpha, m_adaptReward);   // STEP3
-  NS_ABORT_MSG_IF(m_policy != "QLearning" && m_policy != "Probabilistic",
-                  "Policy must be QLearning or Probabilistic, got " << m_policy);
-  m_qtable.SetProbabilistic(m_policy == "Probabilistic");                  // STEP7
-  m_qtable.SetSeqNoWindow(m_seqNoWindow);
-  if (m_useMacFeedback)
-  {
-      m_qtable.SetDelayRef(m_delayRef);   // STEP6
-  }
-  m_qtable.SetLowEnergyThreshold(m_lowEnergyThreshold);
-  {   // QS-QMAODV
-      QTable::QsConfig qc;
-      qc.wq = m_qsWq;
-      qc.adaptiveWq = m_qsAdaptiveWq;
-      qc.wqMax = m_qsWqMax;
-      qc.wqKappa = m_qsWqKappa;
-      qc.failPenalty = m_qsFailPenalty;
-      qc.queueSelect = m_qsQueueSelect;
-      qc.beta = m_qsBeta;
-      m_qtable.SetQsConfig(qc);
-      if (m_qsQueueSelect)
-          m_qtable.SetNextHopQueueFn([this](Ipv4Address nh) { return GetNextHopQueueOccupancy(nh); });
-      if (m_qsDecay)
-          m_qsDecayEvent = Simulator::Schedule(m_qsDecayInterval, &RoutingProtocol::QsDecayTick, this);
-      if (m_qsTrend)
-          m_qsTrendEvent = Simulator::Schedule(m_qsTrendInterval, &RoutingProtocol::QsTrendTick, this);
-  }
-  m_periodicAdaptEvent =
-      Simulator::Schedule(m_periodicAdaptInterval,
-                          &RoutingProtocol::PeriodicAdaptiveTick, this);
+    NS_ABORT_MSG_IF(m_policy != "QLearning" && m_policy != "Probabilistic",
+                    "Policy must be QLearning or Probabilistic, got " << m_policy);
+    m_qtable.SetMaxPaths(m_maxPaths);
+    m_qtable.SetLearningParameters(m_alpha0, m_gamma, m_epsilon0);
+    m_qtable.SetRewardWeights(m_w1, m_w2);
+    m_qtable.SetProbabilistic(m_policy == "Probabilistic");
+    {
+        // QS-QMAODV
+        QTable::QsConfig qc;
+        qc.wq = m_qsWq;
+        qc.failPenalty = m_qsFailPenalty;
+        qc.queueSelect = m_qsQueueSelect;
+        qc.beta = m_qsBeta;
+        qc.queueExplore = m_qsQueueExplore;
+        qc.exploreFloor = m_qsExploreFloor;
+        m_qtable.SetQsConfig(qc);
+        if (m_qsQueueSelect || m_qsQueueExplore)
+        {
+            m_qtable.SetNextHopQueueFn(
+                [this](Ipv4Address nh) { return GetNextHopQueueOccupancy(nh); });
+        }
+        if (m_qsDecay)
+        {
+            m_qsDecayEvent =
+                Simulator::Schedule(m_qsDecayInterval, &RoutingProtocol::QsDecayTick, this);
+        }
+    }
+    m_epsilonDecayEvent =
+        Simulator::Schedule(m_epsilonDecayInterval, &RoutingProtocol::EpsilonDecayTick, this);
 
     NS_LOG_FUNCTION(this);
     if (m_enableHello)
@@ -754,7 +678,7 @@ RoutingProtocol::RouteOutput(Ptr<Packet> p,
     if (m_socketAddresses.empty())
     {
         sockerr = Socket::ERROR_NOROUTETOHOST;
-        NS_LOG_LOGIC("No saqsqmaodv interfaces");
+        NS_LOG_LOGIC("No qsqmaodv interfaces");
         Ptr<Ipv4Route> route;
         return route;
     }
@@ -764,41 +688,22 @@ RoutingProtocol::RouteOutput(Ptr<Packet> p,
     RoutingTableEntry rt;
     if (m_routingTable.LookupValidRoute(dst, rt))
     {
-        // SAQSQMAODV: ε-greedy selection over primary + SA-Q-learned alternates.
+        // multipath next-hop selection for application data; control and ICMP use the primary route
         RoutingTableEntry chosenRt = rt;
-        m_qtable.SelectEpsilonGreedy(rt, chosenRt, &m_routingTable);
-        // SAQSQMAODV-FIX-V2: per-packet SA-Q-update with neighbour-freshness reward.
-        if (!m_useMacFeedback)   // STEP6: legacy proxy update
+        m_qtable.EnsureRecord(rt);
+        double qsQn = 0.0;
+        if (header.GetProtocol() == UdpL4Protocol::PROT_NUMBER && !IsControlPacket(p))
         {
-            RoutingTableEntry nbrCheck;
-            bool fresh = m_routingTable.LookupRoute(chosenRt.GetNextHop(), nbrCheck)
-                         && nbrCheck.GetFlag() == VALID
-                         && nbrCheck.GetLifeTime() > Seconds(0);
-            double ack    = fresh ? 1.0 : 0.0;
-            double delayS = fresh ? 0.005 : 1.0;
-            double eFrac  = GetEnergyFraction();
-            m_qtable.UpdateQValueOrCreate(chosenRt, ack, delayS, eFrac);
+            m_qtable.SelectEpsilonGreedy(rt, chosenRt, &m_routingTable);
+            qsQn = QsOnDecision(chosenRt.GetNextHop()); // QS-QMAODV
         }
         route = chosenRt.GetRoute();
         NS_ASSERT(route);
-        if (m_hopByHop && p)
-        {
-            PrevHopTag self(chosenRt.GetInterface().GetLocal()); // STEP5
-            p->ReplacePacketTag(self);
-            if (m_tagsOnAir && p) // STEP13b: carry the previous-hop address on air (4 B)
-            {
-                UdpHeader uh;
-                bool ctrl = p->PeekHeader(uh) && (uh.GetDestinationPort() == 654 || uh.GetSourcePort() == 654);
-                if (!ctrl)
-                    p->AddPaddingAtEnd(4);
-            }
-        }
-        double qsQn = QsOnDecision(chosenRt.GetNextHop());   // QS
-        if (m_useMacFeedback && p)
-        {
-            QFeedbackTag fb(dst, chosenRt.GetNextHop(), Simulator::Now(), qsQn); // STEP6 + QS
-            p->ReplacePacketTag(fb);
-        }
+        PrevHopTag self(chosenRt.GetInterface().GetLocal());
+        p->ReplacePacketTag(self);
+        QFeedbackTag fb(dst, chosenRt.GetNextHop(), Simulator::Now());
+        fb.SetQ(qsQn);
+        p->ReplacePacketTag(fb);
         NS_LOG_DEBUG("Exist route to " << route->GetDestination() << " from interface "
                                        << route->GetSource());
         if (oif && route->GetOutputDevice() != oif)
@@ -862,7 +767,7 @@ RoutingProtocol::RouteInput(Ptr<const Packet> p,
     NS_LOG_FUNCTION(this << p->GetUid() << header.GetDestination() << idev->GetAddress());
     if (m_socketAddresses.empty())
     {
-        NS_LOG_LOGIC("No saqsqmaodv interfaces");
+        NS_LOG_LOGIC("No qsqmaodv interfaces");
         return false;
     }
     NS_ASSERT(m_ipv4);
@@ -891,7 +796,7 @@ RoutingProtocol::RouteInput(Ptr<const Packet> p,
         return true;
     }
 
-    // SAQSQMAODV is not a multicast routing protocol
+    // QSQMAODV is not a multicast routing protocol
     if (dst.IsMulticast())
     {
         return false;
@@ -935,7 +840,7 @@ RoutingProtocol::RouteInput(Ptr<const Packet> p,
                     p->PeekHeader(udpHeader);
                     if (udpHeader.GetDestinationPort() == QSQMAODV_PORT)
                     {
-                        // SAQSQMAODV packets sent in broadcast are already managed
+                        // QSQMAODV packets sent in broadcast are already managed
                         return true;
                     }
                 }
@@ -1014,40 +919,30 @@ RoutingProtocol::Forwarding(Ptr<const Packet> p,
         if (toDst.GetFlag() == VALID)
         {
             Ptr<Ipv4Route> route = toDst.GetRoute();
-            Ptr<const Packet> out = p;
-            if (m_hopByHop)
+            // multipath next-hop selection at every forwarding node, never back to the previous hop
+            PrevHopTag prev;
+            Ipv4Address prevHop = p->PeekPacketTag(prev) ? prev.Get() : Ipv4Address();
+            RoutingTableEntry chosenRt = toDst;
+            m_qtable.EnsureRecord(toDst);
+            double qsQn = 0.0;
+            if (header.GetProtocol() == UdpL4Protocol::PROT_NUMBER && !IsControlPacket(p))
             {
-                // STEP5: epsilon-greedy selection at the forwarding node,
-                // excluding the previous hop; same per-packet Q-update as the source.
-                PrevHopTag prev;
-                Ipv4Address prevHop = p->PeekPacketTag(prev) ? prev.Get() : Ipv4Address();
-                RoutingTableEntry chosenRt = toDst;
-                m_qtable.SelectEpsilonGreedy(toDst, chosenRt, &m_routingTable, prevHop);
-                if (!m_useMacFeedback)   // STEP6: legacy proxy update
+                // QS-QMAODV: with HopByHop=false intermediate nodes keep the AODV route and
+                // only the source chooses among the alternates (QMAODV: every node chooses)
+                if (m_hopByHop)
                 {
-                    RoutingTableEntry nbrCheck;
-                    bool fresh = m_routingTable.LookupRoute(chosenRt.GetNextHop(), nbrCheck)
-                                 && nbrCheck.GetFlag() == VALID
-                                 && nbrCheck.GetLifeTime() > Seconds(0);
-                    double ack    = fresh ? 1.0 : 0.0;
-                    double delayS = fresh ? 0.005 : 1.0;
-                    m_qtable.UpdateQValueOrCreate(chosenRt, ack, delayS, GetEnergyFraction());
+                    m_qtable.SelectEpsilonGreedy(toDst, chosenRt, &m_routingTable, prevHop);
                 }
-                route = chosenRt.GetRoute();
-                Ptr<Packet> copy = p->Copy();
-                PrevHopTag self(chosenRt.GetInterface().GetLocal());
-                copy->ReplacePacketTag(self);
-                out = copy;
+                qsQn = QsOnDecision(chosenRt.GetNextHop());
             }
-            double qsQn = QsOnDecision(route->GetGateway());   // QS
-            if (m_useMacFeedback)
-            {
-                // STEP6: every forwarding node learns from the outcome of its own hop
-                Ptr<Packet> tagged = out->Copy();
-                QFeedbackTag fb(dst, route->GetGateway(), Simulator::Now(), qsQn);
-                tagged->ReplacePacketTag(fb);
-                out = tagged;
-            }
+            route = chosenRt.GetRoute();
+            Ptr<Packet> copy = p->Copy();
+            PrevHopTag self(chosenRt.GetInterface().GetLocal());
+            copy->ReplacePacketTag(self);
+            Ptr<Packet> out = copy->Copy();
+            QFeedbackTag fb(dst, route->GetGateway(), Simulator::Now());
+            fb.SetQ(qsQn);
+            out->ReplacePacketTag(fb);
             NS_LOG_LOGIC(route->GetSource() << " forwarding to " << dst << " from " << origin
                                             << " packet " << p->GetUid());
 
@@ -1127,7 +1022,7 @@ RoutingProtocol::NotifyInterfaceUp(uint32_t i)
     Ptr<Ipv4L3Protocol> l3 = m_ipv4->GetObject<Ipv4L3Protocol>();
     if (l3->GetNAddresses(i) > 1)
     {
-        NS_LOG_WARN("SAQSQMAODV does not work with more then one address per each interface.");
+        NS_LOG_WARN("QSQMAODV does not work with more then one address per each interface.");
     }
     Ipv4InterfaceAddress iface = l3->GetAddress(i, 0);
     if (iface.GetLocal() == Ipv4Address("127.0.0.1"))
@@ -1138,7 +1033,7 @@ RoutingProtocol::NotifyInterfaceUp(uint32_t i)
     // Create a socket to listen only on this interface
     Ptr<Socket> socket = Socket::CreateSocket(GetObject<Node>(), UdpSocketFactory::GetTypeId());
     NS_ASSERT(socket);
-    socket->SetRecvCallback(MakeCallback(&RoutingProtocol::RecvSaqsqmaodv, this));
+    socket->SetRecvCallback(MakeCallback(&RoutingProtocol::RecvQsqmaodv, this));
     socket->BindToNetDevice(l3->GetNetDevice(i));
     socket->Bind(InetSocketAddress(iface.GetLocal(), QSQMAODV_PORT));
     socket->SetAllowBroadcast(true);
@@ -1148,7 +1043,7 @@ RoutingProtocol::NotifyInterfaceUp(uint32_t i)
     // create also a subnet broadcast socket
     socket = Socket::CreateSocket(GetObject<Node>(), UdpSocketFactory::GetTypeId());
     NS_ASSERT(socket);
-    socket->SetRecvCallback(MakeCallback(&RoutingProtocol::RecvSaqsqmaodv, this));
+    socket->SetRecvCallback(MakeCallback(&RoutingProtocol::RecvQsqmaodv, this));
     socket->BindToNetDevice(l3->GetNetDevice(i));
     socket->Bind(InetSocketAddress(iface.GetBroadcast(), QSQMAODV_PORT));
     socket->SetAllowBroadcast(true);
@@ -1187,44 +1082,76 @@ RoutingProtocol::NotifyInterfaceUp(uint32_t i)
     mac->TraceConnectWithoutContext("DroppedMpdu",
                                     MakeCallback(&RoutingProtocol::NotifyTxError, this));
     mac->TraceConnectWithoutContext("AckedMpdu",
-                                    MakeCallback(&RoutingProtocol::NotifyTxAcked, this)); // STEP6
+                                    MakeCallback(&RoutingProtocol::NotifyTxAcked, this));
 }
 
 void
 RoutingProtocol::NotifyTxError(WifiMacDropReason reason, Ptr<const WifiMpdu> mpdu)
 {
-    MacFeedback(mpdu, false); // STEP6: credit the failure before the link-break handling
+    MacFeedback(mpdu, false);
     m_nb.GetTxErrorCallback()(mpdu->GetHeader());
 }
 
 void
 RoutingProtocol::NotifyTxAcked(Ptr<const WifiMpdu> mpdu)
 {
-    MacFeedback(mpdu, true); // STEP6
+    MacFeedback(mpdu, true);
+}
+
+bool
+RoutingProtocol::IsControlPacket(Ptr<const Packet> p) const
+{
+    UdpHeader uh;
+    return p->PeekHeader(uh) &&
+           (uh.GetDestinationPort() == QSQMAODV_PORT || uh.GetSourcePort() == QSQMAODV_PORT);
+}
+
+bool
+RoutingProtocol::IsDataFrame(Ptr<const Packet> mpduPacket)
+{
+    Ptr<Packet> c = mpduPacket->Copy();
+    LlcSnapHeader llc;
+    if (c->RemoveHeader(llc) == 0 || llc.GetType() != Ipv4L3Protocol::PROT_NUMBER)
+    {
+        return false;
+    }
+    Ipv4Header ip;
+    if (c->RemoveHeader(ip) == 0 || ip.GetProtocol() != UdpL4Protocol::PROT_NUMBER)
+    {
+        return false;
+    }
+    UdpHeader uh;
+    c->RemoveHeader(uh);
+    return uh.GetDestinationPort() != QSQMAODV_PORT && uh.GetSourcePort() != QSQMAODV_PORT;
 }
 
 void
 RoutingProtocol::MacFeedback(Ptr<const WifiMpdu> mpdu, bool acked)
 {
-    // STEP6: reward r = w1*ACK + w2/(1 + delay/d_ref) + w3*E, with ACK and delay
-    // measured at the MAC layer for the hop chosen by THIS node.
-    if (!m_useMacFeedback || !mpdu || !mpdu->GetHeader().IsData())
+    // reward from the MAC outcome and the one-hop delay of a data frame sent by this node
+    if (!mpdu || !mpdu->GetHeader().IsData())
     {
         return;
     }
     QFeedbackTag fb;
-    if (!mpdu->GetPacket()->PeekPacketTag(fb))
+    if (!mpdu->GetPacket()->PeekPacketTag(fb) || !IsDataFrame(mpdu->GetPacket()))
     {
-        return; // control packet or packet not routed by the Q-policy
+        return;
     }
     double delay = (Simulator::Now() - fb.GetTime()).GetSeconds();
     m_qtable.UpdateQValueQs(fb.GetDst(),
                             fb.GetNextHop(),
                             acked ? 1.0 : 0.0,
                             delay,
-                            GetEnergyFraction(),
-                            fb.GetQ());           // QS: q_n observed at decision time
-    if (acked) m_qsStats.fbAck++; else m_qsStats.fbDrop++;
+                            fb.GetQ()); // QS-QMAODV: q_n seen at the decision
+    if (acked)
+    {
+        m_qsStats.fbAck++;
+    }
+    else
+    {
+        m_qsStats.fbDrop++;
+    }
 }
 
 void
@@ -1263,7 +1190,7 @@ RoutingProtocol::NotifyInterfaceDown(uint32_t i)
 
     if (m_socketAddresses.empty())
     {
-        NS_LOG_LOGIC("No saqsqmaodv interfaces");
+        NS_LOG_LOGIC("No qsqmaodv interfaces");
         m_htimer.Cancel();
         m_nb.Clear();
         m_routingTable.Clear();
@@ -1295,7 +1222,7 @@ RoutingProtocol::NotifyAddAddress(uint32_t i, Ipv4InterfaceAddress address)
             Ptr<Socket> socket =
                 Socket::CreateSocket(GetObject<Node>(), UdpSocketFactory::GetTypeId());
             NS_ASSERT(socket);
-            socket->SetRecvCallback(MakeCallback(&RoutingProtocol::RecvSaqsqmaodv, this));
+            socket->SetRecvCallback(MakeCallback(&RoutingProtocol::RecvQsqmaodv, this));
             socket->BindToNetDevice(l3->GetNetDevice(i));
             socket->Bind(InetSocketAddress(iface.GetLocal(), QSQMAODV_PORT));
             socket->SetAllowBroadcast(true);
@@ -1304,7 +1231,7 @@ RoutingProtocol::NotifyAddAddress(uint32_t i, Ipv4InterfaceAddress address)
             // create also a subnet directed broadcast socket
             socket = Socket::CreateSocket(GetObject<Node>(), UdpSocketFactory::GetTypeId());
             NS_ASSERT(socket);
-            socket->SetRecvCallback(MakeCallback(&RoutingProtocol::RecvSaqsqmaodv, this));
+            socket->SetRecvCallback(MakeCallback(&RoutingProtocol::RecvQsqmaodv, this));
             socket->BindToNetDevice(l3->GetNetDevice(i));
             socket->Bind(InetSocketAddress(iface.GetBroadcast(), QSQMAODV_PORT));
             socket->SetAllowBroadcast(true);
@@ -1327,7 +1254,7 @@ RoutingProtocol::NotifyAddAddress(uint32_t i, Ipv4InterfaceAddress address)
     }
     else
     {
-        NS_LOG_LOGIC("SAQSQMAODV does not work with more then one address per each interface. Ignore "
+        NS_LOG_LOGIC("QSQMAODV does not work with more then one address per each interface. Ignore "
                      "added address");
     }
 }
@@ -1358,7 +1285,7 @@ RoutingProtocol::NotifyRemoveAddress(uint32_t i, Ipv4InterfaceAddress address)
             Ptr<Socket> socket =
                 Socket::CreateSocket(GetObject<Node>(), UdpSocketFactory::GetTypeId());
             NS_ASSERT(socket);
-            socket->SetRecvCallback(MakeCallback(&RoutingProtocol::RecvSaqsqmaodv, this));
+            socket->SetRecvCallback(MakeCallback(&RoutingProtocol::RecvQsqmaodv, this));
             // Bind to any IP address so that broadcasts can be received
             socket->BindToNetDevice(l3->GetNetDevice(i));
             socket->Bind(InetSocketAddress(iface.GetLocal(), QSQMAODV_PORT));
@@ -1369,7 +1296,7 @@ RoutingProtocol::NotifyRemoveAddress(uint32_t i, Ipv4InterfaceAddress address)
             // create also a unicast socket
             socket = Socket::CreateSocket(GetObject<Node>(), UdpSocketFactory::GetTypeId());
             NS_ASSERT(socket);
-            socket->SetRecvCallback(MakeCallback(&RoutingProtocol::RecvSaqsqmaodv, this));
+            socket->SetRecvCallback(MakeCallback(&RoutingProtocol::RecvQsqmaodv, this));
             socket->BindToNetDevice(l3->GetNetDevice(i));
             socket->Bind(InetSocketAddress(iface.GetBroadcast(), QSQMAODV_PORT));
             socket->SetAllowBroadcast(true);
@@ -1391,7 +1318,7 @@ RoutingProtocol::NotifyRemoveAddress(uint32_t i, Ipv4InterfaceAddress address)
         }
         if (m_socketAddresses.empty())
         {
-            NS_LOG_LOGIC("No saqsqmaodv interfaces");
+            NS_LOG_LOGIC("No qsqmaodv interfaces");
             m_htimer.Cancel();
             m_nb.Clear();
             m_routingTable.Clear();
@@ -1400,7 +1327,7 @@ RoutingProtocol::NotifyRemoveAddress(uint32_t i, Ipv4InterfaceAddress address)
     }
     else
     {
-        NS_LOG_LOGIC("Remove address not participating in SAQSQMAODV operation");
+        NS_LOG_LOGIC("Remove address not participating in QSQMAODV operation");
     }
 }
 
@@ -1428,17 +1355,17 @@ RoutingProtocol::LoopbackRoute(const Ipv4Header& hdr, Ptr<NetDevice> oif) const
     rt->SetDestination(hdr.GetDestination());
     //
     // Source address selection here is tricky.  The loopback route is
-    // returned when SAQSQMAODV does not have a route; this causes the packet
+    // returned when QSQMAODV does not have a route; this causes the packet
     // to be looped back and handled (cached) in RouteInput() method
     // while a route is found. However, connection-oriented protocols
     // like TCP need to create an endpoint four-tuple (src, src port,
     // dst, dst port) and create a pseudo-header for checksumming.  So,
-    // SAQSQMAODV needs to guess correctly what the eventual source address
+    // QSQMAODV needs to guess correctly what the eventual source address
     // will be.
     //
     // For single interface, single address nodes, this is not a problem.
     // When there are possibly multiple outgoing interfaces, the policy
-    // implemented here is to pick the first available SAQSQMAODV interface.
+    // implemented here is to pick the first available QSQMAODV interface.
     // If RouteOutput() caller specified an outgoing interface, that
     // further constrains the selection of source address
     //
@@ -1461,7 +1388,7 @@ RoutingProtocol::LoopbackRoute(const Ipv4Header& hdr, Ptr<NetDevice> oif) const
     {
         rt->SetSource(j->second.GetLocal());
     }
-    NS_ASSERT_MSG(rt->GetSource() != Ipv4Address(), "Valid SAQSQMAODV source address not found");
+    NS_ASSERT_MSG(rt->GetSource() != Ipv4Address(), "Valid QSQMAODV source address not found");
     rt->SetGateway(Ipv4Address("127.0.0.1"));
     rt->SetOutputDevice(m_lo);
     return rt;
@@ -1557,7 +1484,7 @@ RoutingProtocol::SendRequest(Ipv4Address dst)
     m_requestId++;
     rreqHeader.SetId(m_requestId);
 
-    // Send RREQ as subnet directed broadcast from each interface used by saqsqmaodv
+    // Send RREQ as subnet directed broadcast from each interface used by qsqmaodv
     for (auto j = m_socketAddresses.begin(); j != m_socketAddresses.end(); ++j)
     {
         Ptr<Socket> socket = j->first;
@@ -1571,7 +1498,7 @@ RoutingProtocol::SendRequest(Ipv4Address dst)
         tag.SetTtl(ttl);
         packet->AddPacketTag(tag);
         packet->AddHeader(rreqHeader);
-        TypeHeader tHeader(SAQSQMAODVTYPE_RREQ);
+        TypeHeader tHeader(QSQMAODVTYPE_RREQ);
         packet->AddHeader(tHeader);
         // Send to all-hosts broadcast if on /32 addr, subnet-directed otherwise
         Ipv4Address destination;
@@ -1632,7 +1559,7 @@ RoutingProtocol::ScheduleRreqRetry(Ipv4Address dst)
 }
 
 void
-RoutingProtocol::RecvSaqsqmaodv(Ptr<Socket> socket)
+RoutingProtocol::RecvQsqmaodv(Ptr<Socket> socket)
 {
     NS_LOG_FUNCTION(this << socket);
     Address sourceAddress;
@@ -1654,33 +1581,33 @@ RoutingProtocol::RecvSaqsqmaodv(Ptr<Socket> socket)
     {
         NS_ASSERT_MSG(false, "Received a packet from an unknown socket");
     }
-    NS_LOG_DEBUG("SAQSQMAODV node " << this << " received a SAQSQMAODV packet from " << sender << " to "
+    NS_LOG_DEBUG("QSQMAODV node " << this << " received a QSQMAODV packet from " << sender << " to "
                               << receiver);
 
     UpdateRouteToNeighbor(sender, receiver);
-    TypeHeader tHeader(SAQSQMAODVTYPE_RREQ);
+    TypeHeader tHeader(QSQMAODVTYPE_RREQ);
     packet->RemoveHeader(tHeader);
     if (!tHeader.IsValid())
     {
-        NS_LOG_DEBUG("SAQSQMAODV message " << packet->GetUid() << " with unknown type received: "
+        NS_LOG_DEBUG("QSQMAODV message " << packet->GetUid() << " with unknown type received: "
                                      << tHeader.Get() << ". Drop");
         return; // drop
     }
     switch (tHeader.Get())
     {
-    case SAQSQMAODVTYPE_RREQ: {
+    case QSQMAODVTYPE_RREQ: {
         RecvRequest(packet, receiver, sender);
         break;
     }
-    case SAQSQMAODVTYPE_RREP: {
+    case QSQMAODVTYPE_RREP: {
         RecvReply(packet, receiver, sender);
         break;
     }
-    case SAQSQMAODVTYPE_RERR: {
+    case QSQMAODVTYPE_RERR: {
         RecvError(packet, sender);
         break;
     }
-    case SAQSQMAODVTYPE_RREP_ACK: {
+    case QSQMAODVTYPE_RREP_ACK: {
         RecvReplyAck(sender);
         break;
     }
@@ -1777,7 +1704,7 @@ RoutingProtocol::RecvRequest(Ptr<Packet> p, Ipv4Address receiver, Ipv4Address sr
      */
     if (m_rreqIdCache.IsDuplicate(origin, id))
     {
-        // SAQSQMAODV: store alternate reverse route from duplicate RREQ (multipath capability).
+        // a duplicate RREQ adds an alternate reverse route to the origin
         if (!m_qtable.IsFull(origin))
         {
             uint8_t altHop = rreqHeader.GetHopCount() + 1;
@@ -1790,7 +1717,18 @@ RoutingProtocol::RecvRequest(Ptr<Packet> p, Ipv4Address receiver, Ipv4Address sr
                 /*hops=*/altHop, /*nextHop=*/src,
                 /*lifetime=*/m_activeRouteTimeout);
             alt.SetFlag(VALID);
-            m_qtable.AddRoute(alt);
+            bool added = m_qtable.AddRoute(alt);
+            // the destination also answers this copy along the new reverse route (multicast RREP)
+            if (added && IsMyOwnAddress(rreqHeader.GetDst()))
+            {
+                auto key = std::make_pair(origin.Get(), id);
+                uint32_t& sent = m_mcastRrepSent[key];
+                if (sent + 1 < m_maxPaths)
+                {
+                    ++sent;
+                    SendReply(rreqHeader, alt);
+                }
+            }
         }
         return;
     }
@@ -1948,7 +1886,7 @@ RoutingProtocol::RecvRequest(Ptr<Packet> p, Ipv4Address receiver, Ipv4Address sr
         ttl.SetTtl(tag.GetTtl() - 1);
         packet->AddPacketTag(ttl);
         packet->AddHeader(rreqHeader);
-        TypeHeader tHeader(SAQSQMAODVTYPE_RREQ);
+        TypeHeader tHeader(QSQMAODVTYPE_RREQ);
         packet->AddHeader(tHeader);
         // Send to all-hosts broadcast if on /32 addr, subnet-directed otherwise
         Ipv4Address destination;
@@ -1994,7 +1932,7 @@ RoutingProtocol::SendReply(const RreqHeader& rreqHeader, const RoutingTableEntry
     tag.SetTtl(toOrigin.GetHop());
     packet->AddPacketTag(tag);
     packet->AddHeader(rrepHeader);
-    TypeHeader tHeader(SAQSQMAODVTYPE_RREP);
+    TypeHeader tHeader(QSQMAODVTYPE_RREP);
     packet->AddHeader(tHeader);
     Ptr<Socket> socket = FindSocketWithInterfaceAddress(toOrigin.GetInterface());
     NS_ASSERT(socket);
@@ -2035,7 +1973,7 @@ RoutingProtocol::SendReplyByIntermediateNode(RoutingTableEntry& toDst,
     tag.SetTtl(toOrigin.GetHop());
     packet->AddPacketTag(tag);
     packet->AddHeader(rrepHeader);
-    TypeHeader tHeader(SAQSQMAODVTYPE_RREP);
+    TypeHeader tHeader(QSQMAODVTYPE_RREP);
     packet->AddHeader(tHeader);
     Ptr<Socket> socket = FindSocketWithInterfaceAddress(toOrigin.GetInterface());
     NS_ASSERT(socket);
@@ -2055,7 +1993,7 @@ RoutingProtocol::SendReplyByIntermediateNode(RoutingTableEntry& toDst,
         gratTag.SetTtl(toDst.GetHop());
         packetToDst->AddPacketTag(gratTag);
         packetToDst->AddHeader(gratRepHeader);
-        TypeHeader type(SAQSQMAODVTYPE_RREP);
+        TypeHeader type(QSQMAODVTYPE_RREP);
         packetToDst->AddHeader(type);
         Ptr<Socket> socket = FindSocketWithInterfaceAddress(toDst.GetInterface());
         NS_ASSERT(socket);
@@ -2069,7 +2007,7 @@ RoutingProtocol::SendReplyAck(Ipv4Address neighbor)
 {
     NS_LOG_FUNCTION(this << " to " << neighbor);
     RrepAckHeader h;
-    TypeHeader typeHeader(SAQSQMAODVTYPE_RREP_ACK);
+    TypeHeader typeHeader(QSQMAODVTYPE_RREP_ACK);
     Ptr<Packet> packet = Create<Packet>();
     SocketIpTtlTag tag;
     tag.SetTtl(1);
@@ -2164,15 +2102,7 @@ RoutingProtocol::RecvReply(Ptr<Packet> p, Ipv4Address receiver, Ipv4Address send
         m_routingTable.AddRoute(newEntry);
     }
 
-    // SAQSQMAODV: SA-Q-update on RREP + SeqNo tracking.
-    {
-        // (1) Record destination SeqNo update → drives α_t adaptation (§4.3)
-        m_qtable.RecordSeqNoUpdate();
-        // (2) Add new route + apply positive Q-update with the current adaptive
-        //     α_t and 3-term reward including residual energy fraction.
-        double eFrac = GetEnergyFraction();
-        m_qtable.UpdateQValueOrCreate(newEntry, /*ack=*/1.0, /*delaySec=*/0.005, eFrac);
-    }
+    m_qtable.EnsureRecord(newEntry);
 
     // Acknowledge receipt of the RREP by sending a RREP-ACK message back
     if (rrepHeader.GetAckRequired())
@@ -2231,16 +2161,40 @@ RoutingProtocol::RecvReply(Ptr<Packet> p, Ipv4Address receiver, Ipv4Address send
         return;
     }
 
-    Ptr<Packet> packet = Create<Packet>();
-    SocketIpTtlTag ttl;
-    ttl.SetTtl(tag.GetTtl() - 1);
-    packet->AddPacketTag(ttl);
-    packet->AddHeader(rrepHeader);
-    TypeHeader tHeader(SAQSQMAODVTYPE_RREP);
-    packet->AddHeader(tHeader);
-    Ptr<Socket> socket = FindSocketWithInterfaceAddress(toOrigin.GetInterface());
-    NS_ASSERT(socket);
-    socket->SendTo(packet, 0, InetSocketAddress(toOrigin.GetNextHop(), QSQMAODV_PORT));
+    // multicast RREP: forward the first RREP of a discovery along up to MaxPaths reverse routes
+    auto key = std::make_tuple(rrepHeader.GetOrigin().Get(), dst.Get(), rrepHeader.GetDstSeqno());
+    if (m_rrepForwarded.count(key))
+    {
+        return;
+    }
+    m_rrepForwarded.insert(key);
+    std::vector<RoutingTableEntry> rev;
+    rev.push_back(toOrigin);
+    std::vector<RoutingTableEntry> alts;
+    m_qtable.GetRoutes(rrepHeader.GetOrigin(), alts, &m_routingTable);
+    for (const auto& a : alts)
+    {
+        if (rev.size() >= m_maxPaths)
+            break;
+        bool dup = (a.GetNextHop() == sender);
+        for (const auto& r : rev)
+            dup = dup || (r.GetNextHop() == a.GetNextHop());
+        if (!dup)
+            rev.push_back(a);
+    }
+    for (const auto& r : rev)
+    {
+        Ptr<Packet> copy = Create<Packet>();
+        SocketIpTtlTag t;
+        t.SetTtl(tag.GetTtl() - 1);
+        copy->AddPacketTag(t);
+        copy->AddHeader(rrepHeader);
+        TypeHeader th(QSQMAODVTYPE_RREP);
+        copy->AddHeader(th);
+        Ptr<Socket> sk = FindSocketWithInterfaceAddress(r.GetInterface());
+        NS_ASSERT(sk);
+        sk->SendTo(copy, 0, InetSocketAddress(r.GetNextHop(), QSQMAODV_PORT));
+    }
 }
 
 void
@@ -2325,7 +2279,7 @@ RoutingProtocol::RecvError(Ptr<Packet> p, Ipv4Address src)
     {
         if (!rerrHeader.AddUnDestination(i->first, i->second))
         {
-            TypeHeader typeHeader(SAQSQMAODVTYPE_RERR);
+            TypeHeader typeHeader(QSQMAODVTYPE_RERR);
             Ptr<Packet> packet = Create<Packet>();
             SocketIpTtlTag tag;
             tag.SetTtl(1);
@@ -2345,7 +2299,7 @@ RoutingProtocol::RecvError(Ptr<Packet> p, Ipv4Address src)
     }
     if (rerrHeader.GetDestCount() != 0)
     {
-        TypeHeader typeHeader(SAQSQMAODVTYPE_RERR);
+        TypeHeader typeHeader(QSQMAODVTYPE_RERR);
         Ptr<Packet> packet = Create<Packet>();
         SocketIpTtlTag tag;
         tag.SetTtl(1);
@@ -2355,11 +2309,6 @@ RoutingProtocol::RecvError(Ptr<Packet> p, Ipv4Address src)
         SendRerrMessage(packet, precursors);
     }
     m_routingTable.InvalidateRoutesWithDst(unreachable);
-    // STEP4: RERR-triggered exploration (paper: eps_t = min(0.5, eps_t + 0.2))
-    if (m_useRerrBump && !unreachable.empty())
-    {
-        m_qtable.OnRouteError();
-    }
 }
 
 void
@@ -2473,7 +2422,7 @@ RoutingProtocol::SendHello()
         tag.SetTtl(1);
         packet->AddPacketTag(tag);
         packet->AddHeader(helloHeader);
-        TypeHeader tHeader(SAQSQMAODVTYPE_RREP);
+        TypeHeader tHeader(QSQMAODVTYPE_RREP);
         packet->AddHeader(tHeader);
         // Send to all-hosts broadcast if on /32 addr, subnet-directed otherwise
         Ipv4Address destination;
@@ -2528,11 +2477,6 @@ RoutingProtocol::SendRerrWhenBreaksLinkToNextHop(Ipv4Address nextHop)
         return;
     }
     toNextHop.GetPrecursors(precursors);
-    // STEP4: local link break -> RERR-triggered exploration
-    if (m_useRerrBump)
-    {
-        m_qtable.OnRouteError();
-    }
     rerrHeader.AddUnDestination(nextHop, toNextHop.GetSeqNo());
     m_routingTable.GetListOfDestinationWithNextHop(nextHop, unreachable);
     for (auto i = unreachable.begin(); i != unreachable.end();)
@@ -2540,7 +2484,7 @@ RoutingProtocol::SendRerrWhenBreaksLinkToNextHop(Ipv4Address nextHop)
         if (!rerrHeader.AddUnDestination(i->first, i->second))
         {
             NS_LOG_LOGIC("Send RERR message with maximum size.");
-            TypeHeader typeHeader(SAQSQMAODVTYPE_RERR);
+            TypeHeader typeHeader(QSQMAODVTYPE_RERR);
             Ptr<Packet> packet = Create<Packet>();
             SocketIpTtlTag tag;
             tag.SetTtl(1);
@@ -2560,7 +2504,7 @@ RoutingProtocol::SendRerrWhenBreaksLinkToNextHop(Ipv4Address nextHop)
     }
     if (rerrHeader.GetDestCount() != 0)
     {
-        TypeHeader typeHeader(SAQSQMAODVTYPE_RERR);
+        TypeHeader typeHeader(QSQMAODVTYPE_RERR);
         Ptr<Packet> packet = Create<Packet>();
         SocketIpTtlTag tag;
         tag.SetTtl(1);
@@ -2598,7 +2542,7 @@ RoutingProtocol::SendRerrWhenNoRouteToForward(Ipv4Address dst,
     tag.SetTtl(1);
     packet->AddPacketTag(tag);
     packet->AddHeader(rerrHeader);
-    packet->AddHeader(TypeHeader(SAQSQMAODVTYPE_RERR));
+    packet->AddHeader(TypeHeader(QSQMAODVTYPE_RERR));
     if (m_routingTable.LookupValidRoute(origin, toOrigin))
     {
         Ptr<Socket> socket = FindSocketWithInterfaceAddress(toOrigin.GetInterface());
@@ -2762,104 +2706,54 @@ RoutingProtocol::DoInitialize()
     Ipv4RoutingProtocol::DoInitialize();
 }
 
-} // namespace qsqmaodv
-} // namespace ns3
-
-namespace ns3
-{
-namespace qsqmaodv
-{
-
 void
 RoutingProtocol::SetMaxPaths(uint32_t mp)
 {
-  m_maxPaths = mp;
-  m_qtable.SetMaxPaths(mp);
+    m_maxPaths = mp;
+    m_qtable.SetMaxPaths(mp);
 }
 
 uint32_t
 RoutingProtocol::GetMaxPaths() const
 {
-  return m_maxPaths;
+    return m_maxPaths;
 }
 
 void
-RoutingProtocol::SetSALearningParams(double alpha0, double gamma, double epsilon0)
+RoutingProtocol::EpsilonDecayTick()
 {
-  m_alpha0 = alpha0; m_gamma = gamma; m_epsilon0 = epsilon0;
-  m_qtable.SetLearningParameters(alpha0, gamma, epsilon0);
-}
-
-void
-RoutingProtocol::SetSARewardWeights(double w1, double w2, double w3, double w4)
-{
-  m_w1 = w1; m_w2 = w2; m_w3 = w3;
-  m_qtable.SetRewardWeights(w1, w2, w3, w4);
-}
-
-void
-RoutingProtocol::SetSAAdaptiveParams(double lambda, Time seqNoWindow,
-                                    double lowEnergyThreshold, Time periodicInterval)
-{
-  
-  m_seqNoWindow = seqNoWindow;
-  m_lowEnergyThreshold = lowEnergyThreshold;
-  m_periodicAdaptInterval = periodicInterval;
-  m_qtable.SetTdErrorParams(m_muTdError, m_kappaTdError);
-  m_qtable.SetSeqNoWindow(seqNoWindow);
-  m_qtable.SetLowEnergyThreshold(lowEnergyThreshold);
-}
-
-double
-RoutingProtocol::GetEnergyFraction() const
-{
-  // Try to find a BasicEnergySource attached to this node
-  Ptr<Node> node = m_ipv4 ? m_ipv4->GetObject<Node>() : nullptr;
-  if (!node) return 1.0;
-  Ptr<ns3::energy::EnergySourceContainer> esc =
-      node->GetObject<ns3::energy::EnergySourceContainer>();
-  if (!esc || esc->GetN() == 0) return 1.0;
-  Ptr<ns3::energy::BasicEnergySource> src =
-      DynamicCast<ns3::energy::BasicEnergySource>(esc->Get(0));
-  if (!src) return 1.0;
-  double initE = src->GetInitialEnergy();
-  double remE  = src->GetRemainingEnergy();
-  return (initE > 0.0) ? std::min(1.0, std::max(0.0, remE / initE)) : 1.0;
-}
-
-void
-RoutingProtocol::PeriodicAdaptiveTick()
-{
-  // (1) Periodic ε decay (§4.2)
-  m_qtable.PeriodicEpsilonDecay();
-  // (2) Recompute α_t from Δ_Seq (§4.3)
-  m_qtable.RecomputeAdaptiveAlpha();
-  // (3) Update reward weights based on residual energy (§4.4)
-  m_qtable.RecomputeAdaptiveRewardWeights(GetEnergyFraction());
-  // Re-arm the timer
-  m_periodicAdaptEvent =
-      Simulator::Schedule(m_periodicAdaptInterval,
-                          &RoutingProtocol::PeriodicAdaptiveTick, this);
+    m_qtable.PeriodicEpsilonDecay();
+    m_epsilonDecayEvent =
+        Simulator::Schedule(m_epsilonDecayInterval, &RoutingProtocol::EpsilonDecayTick, this);
 }
 
 // ============================================================================
 // QS-QMAODV: cross-layer queue state
 // ============================================================================
-// AdhocWifiMac with 802.11b is a non-QoS MAC: its only queue is the DCF queue,
+// AdhocWifiMac with IEEE 802.11b is a non-QoS MAC: its only queue is the DCF queue,
 // reached with AC_BE_NQOS (GetTxopQueue(AC_BE) returns nullptr there).
 Ptr<WifiMacQueue>
 RoutingProtocol::GetBeQueue() const
 {
-    if (!m_ipv4) return nullptr;
+    if (!m_ipv4)
+    {
+        return nullptr;
+    }
     Ptr<Node> node = m_ipv4->GetObject<Node>();
     for (uint32_t i = 0; node && i < node->GetNDevices(); ++i)
     {
         Ptr<WifiNetDevice> dev = DynamicCast<WifiNetDevice>(node->GetDevice(i));
-        if (!dev || !dev->GetMac()) continue;
+        if (!dev || !dev->GetMac())
+        {
+            continue;
+        }
         Ptr<WifiMac> mac = dev->GetMac();
-        Ptr<WifiMacQueue> q = mac->GetQosSupported() ? mac->GetTxopQueue(AC_BE)
-                                                     : mac->GetTxopQueue(AC_BE_NQOS);
-        if (q) return q;
+        Ptr<WifiMacQueue> q =
+            mac->GetQosSupported() ? mac->GetTxopQueue(AC_BE) : mac->GetTxopQueue(AC_BE_NQOS);
+        if (q)
+        {
+            return q;
+        }
     }
     return nullptr;
 }
@@ -2867,12 +2761,18 @@ RoutingProtocol::GetBeQueue() const
 bool
 RoutingProtocol::IsQosMac() const
 {
-    if (!m_ipv4) return false;
+    if (!m_ipv4)
+    {
+        return false;
+    }
     Ptr<Node> node = m_ipv4->GetObject<Node>();
     for (uint32_t i = 0; node && i < node->GetNDevices(); ++i)
     {
         Ptr<WifiNetDevice> dev = DynamicCast<WifiNetDevice>(node->GetDevice(i));
-        if (dev && dev->GetMac()) return dev->GetMac()->GetQosSupported();
+        if (dev && dev->GetMac())
+        {
+            return dev->GetMac()->GetQosSupported();
+        }
     }
     return false;
 }
@@ -2880,12 +2780,18 @@ RoutingProtocol::IsQosMac() const
 bool
 RoutingProtocol::LookupMac(Ipv4Address ip, Mac48Address& mac) const
 {
-    if (!m_ipv4) return false;
+    if (!m_ipv4)
+    {
+        return false;
+    }
     Ptr<Ipv4L3Protocol> l3 = m_ipv4->GetObject<Ipv4L3Protocol>();
     for (uint32_t i = 0; l3 && i < l3->GetNInterfaces(); ++i)
     {
         Ptr<ArpCache> arp = l3->GetInterface(i)->GetArpCache();
-        if (!arp) continue;
+        if (!arp)
+        {
+            continue;
+        }
         ArpCache::Entry* e = arp->Lookup(ip);
         if (e && (e->IsAlive() || e->IsPermanent() || e->IsAutoGenerated()))
         {
@@ -2900,9 +2806,11 @@ double
 RoutingProtocol::GetNodeQueueOccupancy() const
 {
     Ptr<WifiMacQueue> q = GetBeQueue();
-    if (!q) return 0.0;
-    double ref = (m_qsNhQueueRef > 0.0) ? m_qsNhQueueRef
-                                        : static_cast<double>(q->GetMaxSize().GetValue());
+    if (!q)
+    {
+        return 0.0;
+    }
+    double ref = (m_qsQueueRef > 0.0) ? m_qsQueueRef : static_cast<double>(q->GetMaxSize().GetValue());
     return (ref > 0.0) ? std::min(1.0, q->GetNPackets() / ref) : 0.0;
 }
 
@@ -2911,34 +2819,44 @@ RoutingProtocol::GetNextHopQueueOccupancy(Ipv4Address nh) const
 {
     Ptr<WifiMacQueue> q = GetBeQueue();
     Mac48Address mac;
-    if (!q || !LookupMac(nh, mac)) return 0.0;
+    if (!q || !LookupMac(nh, mac))
+    {
+        return 0.0;
+    }
     uint32_t n = 0;
     if (IsQosMac())
     {
-        for (uint8_t tid : {uint8_t(0), uint8_t(3)})   // best-effort user priorities
+        for (uint8_t tid : {uint8_t(0), uint8_t(3)}) // best-effort user priorities
+        {
             n += q->GetNPackets(MakeWifiUnicastQueueId(WIFI_QOSDATA_QUEUE, mac, tid));
+        }
     }
     else
     {
         n = q->GetNPackets(MakeWifiUnicastQueueId(WIFI_DATA_QUEUE, mac));
     }
-    double ref = (m_qsNhQueueRef > 0.0) ? m_qsNhQueueRef
-                                        : static_cast<double>(q->GetMaxSize().GetValue());
+    double ref = (m_qsQueueRef > 0.0) ? m_qsQueueRef : static_cast<double>(q->GetMaxSize().GetValue());
     return (ref > 0.0) ? std::min(1.0, n / ref) : 0.0;
 }
 
 double
 RoutingProtocol::QsOnDecision(Ipv4Address nextHop)
 {
-    // Diagnostics only (no random numbers are drawn here).
+    // bookkeeping only: reads queue lengths, draws no random numbers
     double nodeQ = GetNodeQueueOccupancy();
     double qn = GetNextHopQueueOccupancy(nextHop);
     m_qsStats.decisions++;
     m_qsStats.nodeQSum += nodeQ;
     m_qsStats.nodeQMax = std::max(m_qsStats.nodeQMax, nodeQ);
-    if (nodeQ > 0.0) m_qsStats.nodeQPos++;
+    if (nodeQ > 0.0)
+    {
+        m_qsStats.nodeQPos++;
+    }
     m_qsStats.nhQSum += qn;
-    if (qn > 0.0) m_qsStats.nhQPos++;
+    if (qn > 0.0)
+    {
+        m_qsStats.nhQPos++;
+    }
     return qn;
 }
 
@@ -2952,25 +2870,6 @@ RoutingProtocol::QsDecayTick()
     m_qsDecayEvent = Simulator::Schedule(m_qsDecayInterval, &RoutingProtocol::QsDecayTick, this);
 }
 
-void
-RoutingProtocol::QsTrendTick()
-{
-    m_qsTrendHist.push_back(GetNodeQueueOccupancy());
-    while (m_qsTrendHist.size() > m_qsTrendWindow + 1) m_qsTrendHist.pop_front();
-    if (m_qsTrendHist.size() == m_qsTrendWindow + 1)
-    {
-        bool rising = true;
-        for (size_t k = 1; k < m_qsTrendHist.size(); ++k)
-            if (m_qsTrendHist[k] - m_qsTrendHist[k - 1] <= m_qsTrendDelta) { rising = false; break; }
-        if (rising)
-        {
-            m_qtable.BumpEpsilon(m_qsTrendBump, m_qsTrendCap);
-            m_qsStats.trendBumps++;
-            m_qsTrendHist.clear();
-        }
-    }
-    m_qsTrendEvent = Simulator::Schedule(m_qsTrendInterval, &RoutingProtocol::QsTrendTick, this);
-}
 
 } // namespace qsqmaodv
 } // namespace ns3

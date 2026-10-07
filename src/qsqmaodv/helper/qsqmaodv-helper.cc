@@ -23,7 +23,11 @@
 #include "ns3/ipv4-list-routing.h"
 #include "ns3/names.h"
 #include "ns3/node-list.h"
+#include "ns3/boolean.h"
+#include "ns3/double.h"
 #include "ns3/ptr.h"
+#include "ns3/string.h"
+#include "ns3/uinteger.h"
 
 namespace ns3
 {
@@ -66,26 +70,26 @@ QsqmaodvHelper::AssignStreams(NodeContainer c, int64_t stream)
         NS_ASSERT_MSG(ipv4, "Ipv4 not installed on node");
         Ptr<Ipv4RoutingProtocol> proto = ipv4->GetRoutingProtocol();
         NS_ASSERT_MSG(proto, "Ipv4 routing not installed on node");
-        Ptr<qsqmaodv::RoutingProtocol> saqsqmaodv = DynamicCast<qsqmaodv::RoutingProtocol>(proto);
-        if (saqsqmaodv)
+        Ptr<qsqmaodv::RoutingProtocol> qsqmaodv = DynamicCast<qsqmaodv::RoutingProtocol>(proto);
+        if (qsqmaodv)
         {
-            currentStream += saqsqmaodv->AssignStreams(currentStream);
+            currentStream += qsqmaodv->AssignStreams(currentStream);
             continue;
         }
-        // Saqsqmaodv may also be in a list
+        // Qsqmaodv may also be in a list
         Ptr<Ipv4ListRouting> list = DynamicCast<Ipv4ListRouting>(proto);
         if (list)
         {
             int16_t priority;
             Ptr<Ipv4RoutingProtocol> listProto;
-            Ptr<qsqmaodv::RoutingProtocol> listSaqsqmaodv;
+            Ptr<qsqmaodv::RoutingProtocol> listQsqmaodv;
             for (uint32_t i = 0; i < list->GetNRoutingProtocols(); i++)
             {
                 listProto = list->GetRoutingProtocol(i, priority);
-                listSaqsqmaodv = DynamicCast<qsqmaodv::RoutingProtocol>(listProto);
-                if (listSaqsqmaodv)
+                listQsqmaodv = DynamicCast<qsqmaodv::RoutingProtocol>(listProto);
+                if (listQsqmaodv)
                 {
-                    currentStream += listSaqsqmaodv->AssignStreams(currentStream);
+                    currentStream += listQsqmaodv->AssignStreams(currentStream);
                     break;
                 }
             }

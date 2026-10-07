@@ -14,3 +14,5 @@ __pycache__/
 setup.log
 *.log
 data/v2/runs/**/.tmp_*
+release/
+verify/

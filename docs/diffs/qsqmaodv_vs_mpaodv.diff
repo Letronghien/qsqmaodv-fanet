@@ -1,0 +1,745 @@
+diff -ruN a/qsqmaodv/helper/qsqmaodv-helper.cc b/qsqmaodv/helper/qsqmaodv-helper.cc
+--- a/qsqmaodv/helper/qsqmaodv-helper.cc	2026-10-06 13:11:35.092876652 +0000
++++ b/qsqmaodv/helper/qsqmaodv-helper.cc	2026-10-06 13:11:35.122642199 +0000
+@@ -98,17 +98,4 @@
+     return (currentStream - stream);
+ }
+ 
+-PmaodvHelper::PmaodvHelper(uint32_t maxPaths)
+-    : QsqmaodvHelper()
+-{
+-    Set("Policy", StringValue("Probabilistic"));
+-    Set("MaxPaths", UintegerValue(maxPaths));
+-}
+-
+-QmaodvHelper::QmaodvHelper()
+-    : QsqmaodvHelper()
+-{
+-    Set("Policy", StringValue("QLearning"));
+-}
+-
+ } // namespace ns3
+diff -ruN a/qsqmaodv/helper/qsqmaodv-helper.h b/qsqmaodv/helper/qsqmaodv-helper.h
+--- a/qsqmaodv/helper/qsqmaodv-helper.h	2026-10-06 13:11:35.092759508 +0000
++++ b/qsqmaodv/helper/qsqmaodv-helper.h	2026-10-06 13:11:35.122620693 +0000
+@@ -79,30 +79,6 @@
+     ObjectFactory m_agentFactory;
+ };
+ 
+-/**
+- * \ingroup qsqmaodv
+- * \brief PMAODV: probabilistic multipath AODV, p_i proportional to 1/HC_i, k routes.
+- */
+-class PmaodvHelper : public QsqmaodvHelper
+-{
+-  public:
+-    /**
+-     * \param maxPaths maximum number of routes per destination (2, 3 or 4)
+-     */
+-    PmaodvHelper(uint32_t maxPaths = 3);
+-};
+-
+-/**
+- * \ingroup qsqmaodv
+- * \brief QMAODV: Q-learning multipath AODV (alpha 0.5, gamma 0.9, epsilon 0.5 decayed by 0.02
+- * every 10 s, reward 0.6 ACK + 0.4 / (1 + delay_ms)).
+- */
+-class QmaodvHelper : public QsqmaodvHelper
+-{
+-  public:
+-    QmaodvHelper();
+-};
+-
+ } // namespace ns3
+ 
+ #endif /* QSQMAODV_HELPER_H */
+diff -ruN a/qsqmaodv/model/qsqmaodv-qtable.cc b/qsqmaodv/model/qsqmaodv-qtable.cc
+--- a/qsqmaodv/model/qsqmaodv-qtable.cc	2026-10-06 13:11:35.091060097 +0000
++++ b/qsqmaodv/model/qsqmaodv-qtable.cc	2026-10-06 13:11:35.122806272 +0000
+@@ -90,6 +90,37 @@
+     return m_w1 * ackSuccess + m_w2 * (1.0 / (1.0 + delaySec / oneMs));
+ }
+ 
++// QS-QMAODV reward:
++//   r = s*(w1*ACK + w2/(1 + d_ms)) + wq*ACK*(1 - q_n) - P*(1 - ACK)
++//   s = (w1 + w2 - wq)/(w1 + w2) keeps the maximum reward unchanged; wq is a fixed weight.
++// With wq = 0 and P = 0 this is exactly ComputeReward (same operations, same order).
++double
++QTable::ComputeRewardQs(double ackSuccess, double delaySec, double qn) const
++{
++    const double oneMs = 0.001;
++    if (delaySec < 0.0)
++    {
++        delaySec = 0.0;
++    }
++    qn = std::min(1.0, std::max(0.0, qn));
++    const double wqEff = m_qs.wq;
++    double base = m_w1 * ackSuccess + m_w2 * (1.0 / (1.0 + delaySec / oneMs));
++    if (wqEff > 0.0 && (m_w1 + m_w2) > 0.0)
++    {
++        base *= (m_w1 + m_w2 - wqEff) / (m_w1 + m_w2);
++    }
++    double r = base;
++    if (wqEff > 0.0)
++    {
++        r += wqEff * ackSuccess * (1.0 - qn);
++    }
++    if (m_qs.failPenalty > 0.0 && ackSuccess < 0.5)
++    {
++        r -= m_qs.failPenalty;
++    }
++    return r;
++}
++
+ std::vector<QRecord>::iterator
+ QTable::FindWorst(std::vector<QRecord>& vec)
+ {
+@@ -322,6 +353,64 @@
+         return true;
+     }
+ 
++    // QS-QMAODV: queue state of every candidate next hop (only when a QS option needs it)
++    std::vector<double> qn(cands.size(), 0.0);
++    double qScale = 0.0;
++    const bool qsSel = m_qs.queueSelect && m_nhQueueFn;
++    const bool qsExp = m_qs.queueExplore && m_nhQueueFn;
++    if (qsSel || qsExp)
++    {
++        for (size_t i = 0; i < cands.size(); ++i)
++        {
++            qn[i] = std::min(1.0, std::max(0.0, m_nhQueueFn(cands[i].rt.GetNextHop())));
++            qScale = std::max(qScale, std::fabs(cands[i].qValue));
++        }
++        if (qScale < 1e-6)
++        {
++            qScale = 1.0;
++        }
++    }
++    auto greedy = [&]() {
++        size_t best = 0;
++        double bq = -std::numeric_limits<double>::infinity();
++        uint32_t bhc = std::numeric_limits<uint32_t>::max();
++        for (size_t i = 0; i < cands.size(); ++i)
++        {
++            double q = cands[i].qValue;
++            if (qsSel)
++            {
++                q -= m_qs.beta * qn[i] * qScale; // queue-aware exploitation (sign-safe)
++            }
++            uint32_t hc = cands[i].rt.GetHop();
++            if (q > bq || (std::fabs(q - bq) < 1e-9 && hc < bhc))
++            {
++                bq = q;
++                bhc = hc;
++                best = i;
++            }
++        }
++        return best;
++    };
++    if (qsExp)
++    {
++        // queue-driven exploration: eps_eff = floor + (eps - floor) * q of the greedy next hop
++        size_t g = greedy();
++        double floor = std::min(m_qs.exploreFloor, m_epsilon);
++        double epsEff = floor + (m_epsilon - floor) * qn[g];
++        if (m_uniform->GetValue(0.0, 1.0) < epsEff)
++        {
++            auto idx = static_cast<uint32_t>(m_uniform->GetValue(0.0, static_cast<double>(cands.size())));
++            if (idx >= cands.size())
++            {
++                idx = cands.size() - 1;
++            }
++            out = cands[idx].rt;
++            return true;
++        }
++        out = cands[g].rt;
++        return true;
++    }
++
+     double u = m_uniform->GetValue(0.0, 1.0);
+     if (u < m_epsilon)
+     {
+@@ -334,6 +423,11 @@
+         return true;
+     }
+ 
++    if (qsSel)
++    {
++        out = cands[greedy()].rt;
++        return true;
++    }
+     size_t bestIdx = 0;
+     double bestQ = -std::numeric_limits<double>::infinity();
+     uint32_t bestHC = std::numeric_limits<uint32_t>::max();
+@@ -358,7 +452,17 @@
+                      double ackSuccess,
+                      double delaySec)
+ {
+-    double reward = ComputeReward(ackSuccess, delaySec);
++    UpdateQValueQs(dst, nextHop, ackSuccess, delaySec, 0.0);
++}
++
++void
++QTable::UpdateQValueQs(Ipv4Address dst,
++                       Ipv4Address nextHop,
++                       double ackSuccess,
++                       double delaySec,
++                       double qn)
++{
++    double reward = ComputeRewardQs(ackSuccess, delaySec, qn);
+     auto it = m_records.find(dst);
+     if (it == m_records.end())
+     {
+@@ -387,7 +491,26 @@
+     if (ackSuccess > 0.5)
+     {
+         target->ackCount += 1;
++        target->lastAck = Simulator::Now();
++    }
++}
++
++uint32_t
++QTable::DecayStale(Time now, double tauSec, double factor, uint32_t minTx)
++{
++    uint32_t n = 0;
++    for (auto& kv : m_records)
++    {
++        for (auto& r : kv.second)
++        {
++            if (r.txCount >= minTx && r.qValue > 0.0 && (now - r.lastAck).GetSeconds() > tauSec)
++            {
++                r.qValue *= factor; // negative estimates (penalties) are kept
++                ++n;
++            }
++        }
+     }
++    return n;
+ }
+ 
+ uint32_t
+diff -ruN a/qsqmaodv/model/qsqmaodv-qtable.h b/qsqmaodv/model/qsqmaodv-qtable.h
+--- a/qsqmaodv/model/qsqmaodv-qtable.h	2026-10-06 13:11:35.090153171 +0000
++++ b/qsqmaodv/model/qsqmaodv-qtable.h	2026-10-06 13:11:35.122825123 +0000
+@@ -23,6 +23,7 @@
+ 
+ #include <deque>
+ #include <map>
++#include <functional>
+ #include <vector>
+ 
+ namespace ns3
+@@ -41,6 +42,8 @@
+     uint32_t txCount;     ///< number of Q-updates
+     uint32_t ackCount;    ///< number of acknowledged frames
+ 
++    Time lastAck{Seconds(0)}; ///< QS-QMAODV: time of the last MAC ACK on this pair
++
+     QRecord()
+         : qValue(0.0),
+           txCount(0),
+@@ -126,6 +129,30 @@
+      * \param rt route
+      * \return true if added
+      */
++    // ======================= QS-QMAODV extensions ===========================
++    /// Queue-state configuration. All off = QMAODV behaviour (bit-identical).
++    struct QsConfig
++    {
++        double wq{0.0};            ///< weight of the queue term  wq*ACK*(1 - q_n) (fixed)
++        double failPenalty{0.0};   ///< subtracted from r when the MAC drops the frame
++        bool queueSelect{false};   ///< exploitation score Q - beta*q_n*max|Q|
++        double beta{0.5};
++        bool queueExplore{false};  ///< queue-driven exploration
++        double exploreFloor{0.01}; ///< exploration probability when the greedy hop's queue is empty
++    };
++
++    void SetQsConfig(const QsConfig& c) { m_qs = c; }
++    const QsConfig& GetQsConfig() const { return m_qs; }
++    /// q_n provider: occupancy of the MAC BE queue towards next hop n, in [0,1]
++    void SetNextHopQueueFn(std::function<double(Ipv4Address)> fn) { m_nhQueueFn = std::move(fn); }
++    /// Q-update with the queue occupancy q_n observed when the next hop was chosen
++    void UpdateQValueQs(Ipv4Address dst, Ipv4Address nextHop, double ackSuccess,
++                        double delaySec, double qn);
++    /// ACK-silence decay of positive Q-values; returns the number of decayed entries
++    uint32_t DecayStale(Time now, double tauSec, double factor, uint32_t minTx);
++    /// QS reward; equals ComputeReward when the QS terms are off
++    double ComputeRewardQs(double ackSuccess, double delaySec, double qn) const;
++
+     bool EnsureRecord(const RoutingTableEntry& rt);
+     /**
+      * Initial Q-values (Eq. 1) of the routes that were never updated.
+@@ -212,6 +239,9 @@
+     bool m_probabilistic{false};                           ///< PMAODV selection
+     double m_epsilonStep;                                  ///< periodic decay
+     Ptr<UniformRandomVariable> m_uniform;                  ///< selection random variable
++
++    QsConfig m_qs;                                     ///< QS-QMAODV configuration
++    std::function<double(Ipv4Address)> m_nhQueueFn;    ///< q_n provider
+ };
+ 
+ } // namespace qsqmaodv
+diff -ruN a/qsqmaodv/model/qsqmaodv-routing-protocol.cc b/qsqmaodv/model/qsqmaodv-routing-protocol.cc
+--- a/qsqmaodv/model/qsqmaodv-routing-protocol.cc	2026-10-06 13:11:35.091286484 +0000
++++ b/qsqmaodv/model/qsqmaodv-routing-protocol.cc	2026-10-06 13:11:35.122881887 +0000
+@@ -24,6 +24,16 @@
+  * Authors: Elena Buchatskaia <borovkovaes@iitp.ru>
+  *          Pavel Boyko <boyko@iitp.ru>
+  */
++// QS-QMAODV: Wi-Fi queue headers contain templates that log; include them before the
++// node-context logging macro below.
++#include "ns3/arp-cache.h"
++#include "ns3/ipv4-l3-protocol.h"
++#include "ns3/mac48-address.h"
++#include "ns3/wifi-mac-queue-container.h"
++#include "ns3/wifi-mac-queue.h"
++#include "ns3/wifi-mac.h"
++
++#undef NS_LOG_APPEND_CONTEXT
+ #define NS_LOG_APPEND_CONTEXT                                                                      \
+     if (m_ipv4)                                                                                    \
+     {                                                                                              \
+@@ -190,7 +200,8 @@
+     QFeedbackTag(Ipv4Address dst = Ipv4Address(), Ipv4Address nh = Ipv4Address(), Time t = Seconds(0))
+         : m_dst(dst),
+           m_nh(nh),
+-          m_t(t)
++          m_t(t),
++          m_q(0.0)
+     {
+     }
+ 
+@@ -204,18 +215,20 @@
+     }
+ 
+     TypeId GetInstanceTypeId() const override { return GetTypeId(); }
+-    uint32_t GetSerializedSize() const override { return 16; }
++    uint32_t GetSerializedSize() const override { return 24; }
+     void Serialize(TagBuffer i) const override
+     {
+         i.WriteU32(m_dst.Get());
+         i.WriteU32(m_nh.Get());
+         i.WriteU64(static_cast<uint64_t>(m_t.GetTimeStep()));
++        i.WriteDouble(m_q);
+     }
+     void Deserialize(TagBuffer i) override
+     {
+         m_dst = Ipv4Address(i.ReadU32());
+         m_nh = Ipv4Address(i.ReadU32());
+         m_t = TimeStep(static_cast<int64_t>(i.ReadU64()));
++        m_q = i.ReadDouble();
+     }
+     void Print(std::ostream& os) const override
+     {
+@@ -224,11 +237,15 @@
+     Ipv4Address GetDst() const { return m_dst; }
+     Ipv4Address GetNextHop() const { return m_nh; }
+     Time GetTime() const { return m_t; }
++    /// QS-QMAODV: occupancy q_n of the chosen next hop when the decision was made
++    double GetQ() const { return m_q; }
++    void SetQ(double q) { m_q = q; }
+ 
+   private:
+     Ipv4Address m_dst;
+     Ipv4Address m_nh;
+     Time m_t;
++    double m_q;
+ };
+ 
+ NS_OBJECT_ENSURE_REGISTERED(QFeedbackTag);
+@@ -320,6 +337,75 @@
+                           DoubleValue(0.4),
+                           MakeDoubleAccessor(&RoutingProtocol::m_w2),
+                           MakeDoubleChecker<double>())
++            // ================= QS-QMAODV attributes ===================================
++            .AddAttribute("HopByHop",
++                          "Next-hop learning at every forwarding node (true, QMAODV) or at the "
++                          "source only (false, QS-QMAODV: intermediate nodes keep the AODV route)",
++                          BooleanValue(false),
++                          MakeBooleanAccessor(&RoutingProtocol::m_hopByHop),
++                          MakeBooleanChecker())
++            .AddAttribute("QueueRewardWeight",
++                          "QS: fixed weight wq of the queue term wq*ACK*(1-q_n) (0 = QMAODV reward)",
++                          DoubleValue(0.10),
++                          MakeDoubleAccessor(&RoutingProtocol::m_qsWq),
++                          MakeDoubleChecker<double>(0.0, 1.0))
++            .AddAttribute("FailurePenalty",
++                          "QS: subtracted from the reward when the MAC drops the frame (0 = QMAODV)",
++                          DoubleValue(0.5),
++                          MakeDoubleAccessor(&RoutingProtocol::m_qsFailPenalty),
++                          MakeDoubleChecker<double>(0.0))
++            .AddAttribute("QueueAwareSelect",
++                          "QS: exploitation score Q - beta*q_n*max|Q| (false = argmax Q)",
++                          BooleanValue(true),
++                          MakeBooleanAccessor(&RoutingProtocol::m_qsQueueSelect),
++                          MakeBooleanChecker())
++            .AddAttribute("QueueSelectBeta",
++                          "QS: beta of the queue-aware score",
++                          DoubleValue(0.5),
++                          MakeDoubleAccessor(&RoutingProtocol::m_qsBeta),
++                          MakeDoubleChecker<double>(0.0))
++            .AddAttribute("QueueDrivenExploration",
++                          "QS: exploration probability = floor + (epsilon - floor) * q of the "
++                          "greedy next hop (false = QMAODV epsilon-greedy)",
++                          BooleanValue(true),
++                          MakeBooleanAccessor(&RoutingProtocol::m_qsQueueExplore),
++                          MakeBooleanChecker())
++            .AddAttribute("ExplorationFloor",
++                          "QS: exploration probability with an empty queue",
++                          DoubleValue(0.01),
++                          MakeDoubleAccessor(&RoutingProtocol::m_qsExploreFloor),
++                          MakeDoubleChecker<double>(0.0, 1.0))
++            .AddAttribute("AckSilenceDecay",
++                          "QS: shrink positive Q of pairs without MAC ACK for AckSilenceThreshold",
++                          BooleanValue(true),
++                          MakeBooleanAccessor(&RoutingProtocol::m_qsDecay),
++                          MakeBooleanChecker())
++            .AddAttribute("AckSilenceThreshold",
++                          "QS: silence threshold tau",
++                          TimeValue(Seconds(15)),
++                          MakeTimeAccessor(&RoutingProtocol::m_qsDecayThreshold),
++                          MakeTimeChecker())
++            .AddAttribute("DecayFactor",
++                          "QS: multiplicative decay of positive Q",
++                          DoubleValue(0.92),
++                          MakeDoubleAccessor(&RoutingProtocol::m_qsDecayFactor),
++                          MakeDoubleChecker<double>(0.0, 1.0))
++            .AddAttribute("DecayMinTx",
++                          "QS: minimum transmissions before a pair can be decayed",
++                          UintegerValue(3),
++                          MakeUintegerAccessor(&RoutingProtocol::m_qsDecayMinTx),
++                          MakeUintegerChecker<uint32_t>())
++            .AddAttribute("DecayInterval",
++                          "QS: period of the decay pass",
++                          TimeValue(Seconds(10)),
++                          MakeTimeAccessor(&RoutingProtocol::m_qsDecayInterval),
++                          MakeTimeChecker())
++            .AddAttribute("QueueRefPackets",
++                          "QS: queue length (packets) counted as full (q = 1); "
++                          "0 = MAC queue MaxSize",
++                          DoubleValue(20.0),
++                          MakeDoubleAccessor(&RoutingProtocol::m_qsQueueRef),
++                          MakeDoubleChecker<double>(0.0))
+             .AddAttribute("EpsilonDecayInterval",
+                           "Period of the exploration decay",
+                           TimeValue(Seconds(10.0)),
+@@ -495,6 +581,7 @@
+ void
+ RoutingProtocol::DoDispose()
+ {
++    m_qsDecayEvent.Cancel();
+     m_ipv4 = nullptr;
+     for (auto iter = m_socketAddresses.begin(); iter != m_socketAddresses.end(); iter++)
+     {
+@@ -540,6 +627,27 @@
+     m_qtable.SetLearningParameters(m_alpha0, m_gamma, m_epsilon0);
+     m_qtable.SetRewardWeights(m_w1, m_w2);
+     m_qtable.SetProbabilistic(m_policy == "Probabilistic");
++    {
++        // QS-QMAODV
++        QTable::QsConfig qc;
++        qc.wq = m_qsWq;
++        qc.failPenalty = m_qsFailPenalty;
++        qc.queueSelect = m_qsQueueSelect;
++        qc.beta = m_qsBeta;
++        qc.queueExplore = m_qsQueueExplore;
++        qc.exploreFloor = m_qsExploreFloor;
++        m_qtable.SetQsConfig(qc);
++        if (m_qsQueueSelect || m_qsQueueExplore)
++        {
++            m_qtable.SetNextHopQueueFn(
++                [this](Ipv4Address nh) { return GetNextHopQueueOccupancy(nh); });
++        }
++        if (m_qsDecay)
++        {
++            m_qsDecayEvent =
++                Simulator::Schedule(m_qsDecayInterval, &RoutingProtocol::QsDecayTick, this);
++        }
++    }
+     m_epsilonDecayEvent =
+         Simulator::Schedule(m_epsilonDecayInterval, &RoutingProtocol::EpsilonDecayTick, this);
+ 
+@@ -583,15 +691,18 @@
+         // multipath next-hop selection for application data; control and ICMP use the primary route
+         RoutingTableEntry chosenRt = rt;
+         m_qtable.EnsureRecord(rt);
++        double qsQn = 0.0;
+         if (header.GetProtocol() == UdpL4Protocol::PROT_NUMBER && !IsControlPacket(p))
+         {
+             m_qtable.SelectEpsilonGreedy(rt, chosenRt, &m_routingTable);
++            qsQn = QsOnDecision(chosenRt.GetNextHop()); // QS-QMAODV
+         }
+         route = chosenRt.GetRoute();
+         NS_ASSERT(route);
+         PrevHopTag self(chosenRt.GetInterface().GetLocal());
+         p->ReplacePacketTag(self);
+         QFeedbackTag fb(dst, chosenRt.GetNextHop(), Simulator::Now());
++        fb.SetQ(qsQn);
+         p->ReplacePacketTag(fb);
+         NS_LOG_DEBUG("Exist route to " << route->GetDestination() << " from interface "
+                                        << route->GetSource());
+@@ -813,9 +924,16 @@
+             Ipv4Address prevHop = p->PeekPacketTag(prev) ? prev.Get() : Ipv4Address();
+             RoutingTableEntry chosenRt = toDst;
+             m_qtable.EnsureRecord(toDst);
++            double qsQn = 0.0;
+             if (header.GetProtocol() == UdpL4Protocol::PROT_NUMBER && !IsControlPacket(p))
+             {
+-                m_qtable.SelectEpsilonGreedy(toDst, chosenRt, &m_routingTable, prevHop);
++                // QS-QMAODV: with HopByHop=false intermediate nodes keep the AODV route and
++                // only the source chooses among the alternates (QMAODV: every node chooses)
++                if (m_hopByHop)
++                {
++                    m_qtable.SelectEpsilonGreedy(toDst, chosenRt, &m_routingTable, prevHop);
++                }
++                qsQn = QsOnDecision(chosenRt.GetNextHop());
+             }
+             route = chosenRt.GetRoute();
+             Ptr<Packet> copy = p->Copy();
+@@ -823,6 +941,7 @@
+             copy->ReplacePacketTag(self);
+             Ptr<Packet> out = copy->Copy();
+             QFeedbackTag fb(dst, route->GetGateway(), Simulator::Now());
++            fb.SetQ(qsQn);
+             out->ReplacePacketTag(fb);
+             NS_LOG_LOGIC(route->GetSource() << " forwarding to " << dst << " from " << origin
+                                             << " packet " << p->GetUid());
+@@ -1020,10 +1139,19 @@
+         return;
+     }
+     double delay = (Simulator::Now() - fb.GetTime()).GetSeconds();
+-    m_qtable.UpdateQValue(fb.GetDst(),
+-                          fb.GetNextHop(),
+-                          acked ? 1.0 : 0.0,
+-                          delay);
++    m_qtable.UpdateQValueQs(fb.GetDst(),
++                            fb.GetNextHop(),
++                            acked ? 1.0 : 0.0,
++                            delay,
++                            fb.GetQ()); // QS-QMAODV: q_n seen at the decision
++    if (acked)
++    {
++        m_qsStats.fbAck++;
++    }
++    else
++    {
++        m_qsStats.fbDrop++;
++    }
+ }
+ 
+ void
+@@ -2599,5 +2727,149 @@
+         Simulator::Schedule(m_epsilonDecayInterval, &RoutingProtocol::EpsilonDecayTick, this);
+ }
+ 
++// ============================================================================
++// QS-QMAODV: cross-layer queue state
++// ============================================================================
++// AdhocWifiMac with IEEE 802.11b is a non-QoS MAC: its only queue is the DCF queue,
++// reached with AC_BE_NQOS (GetTxopQueue(AC_BE) returns nullptr there).
++Ptr<WifiMacQueue>
++RoutingProtocol::GetBeQueue() const
++{
++    if (!m_ipv4)
++    {
++        return nullptr;
++    }
++    Ptr<Node> node = m_ipv4->GetObject<Node>();
++    for (uint32_t i = 0; node && i < node->GetNDevices(); ++i)
++    {
++        Ptr<WifiNetDevice> dev = DynamicCast<WifiNetDevice>(node->GetDevice(i));
++        if (!dev || !dev->GetMac())
++        {
++            continue;
++        }
++        Ptr<WifiMac> mac = dev->GetMac();
++        Ptr<WifiMacQueue> q =
++            mac->GetQosSupported() ? mac->GetTxopQueue(AC_BE) : mac->GetTxopQueue(AC_BE_NQOS);
++        if (q)
++        {
++            return q;
++        }
++    }
++    return nullptr;
++}
++
++bool
++RoutingProtocol::IsQosMac() const
++{
++    if (!m_ipv4)
++    {
++        return false;
++    }
++    Ptr<Node> node = m_ipv4->GetObject<Node>();
++    for (uint32_t i = 0; node && i < node->GetNDevices(); ++i)
++    {
++        Ptr<WifiNetDevice> dev = DynamicCast<WifiNetDevice>(node->GetDevice(i));
++        if (dev && dev->GetMac())
++        {
++            return dev->GetMac()->GetQosSupported();
++        }
++    }
++    return false;
++}
++
++bool
++RoutingProtocol::LookupMac(Ipv4Address ip, Mac48Address& mac) const
++{
++    if (!m_ipv4)
++    {
++        return false;
++    }
++    Ptr<Ipv4L3Protocol> l3 = m_ipv4->GetObject<Ipv4L3Protocol>();
++    for (uint32_t i = 0; l3 && i < l3->GetNInterfaces(); ++i)
++    {
++        Ptr<ArpCache> arp = l3->GetInterface(i)->GetArpCache();
++        if (!arp)
++        {
++            continue;
++        }
++        ArpCache::Entry* e = arp->Lookup(ip);
++        if (e && (e->IsAlive() || e->IsPermanent() || e->IsAutoGenerated()))
++        {
++            mac = Mac48Address::ConvertFrom(e->GetMacAddress());
++            return true;
++        }
++    }
++    return false;
++}
++
++double
++RoutingProtocol::GetNodeQueueOccupancy() const
++{
++    Ptr<WifiMacQueue> q = GetBeQueue();
++    if (!q)
++    {
++        return 0.0;
++    }
++    double ref = (m_qsQueueRef > 0.0) ? m_qsQueueRef : static_cast<double>(q->GetMaxSize().GetValue());
++    return (ref > 0.0) ? std::min(1.0, q->GetNPackets() / ref) : 0.0;
++}
++
++double
++RoutingProtocol::GetNextHopQueueOccupancy(Ipv4Address nh) const
++{
++    Ptr<WifiMacQueue> q = GetBeQueue();
++    Mac48Address mac;
++    if (!q || !LookupMac(nh, mac))
++    {
++        return 0.0;
++    }
++    uint32_t n = 0;
++    if (IsQosMac())
++    {
++        for (uint8_t tid : {uint8_t(0), uint8_t(3)}) // best-effort user priorities
++        {
++            n += q->GetNPackets(MakeWifiUnicastQueueId(WIFI_QOSDATA_QUEUE, mac, tid));
++        }
++    }
++    else
++    {
++        n = q->GetNPackets(MakeWifiUnicastQueueId(WIFI_DATA_QUEUE, mac));
++    }
++    double ref = (m_qsQueueRef > 0.0) ? m_qsQueueRef : static_cast<double>(q->GetMaxSize().GetValue());
++    return (ref > 0.0) ? std::min(1.0, n / ref) : 0.0;
++}
++
++double
++RoutingProtocol::QsOnDecision(Ipv4Address nextHop)
++{
++    // bookkeeping only: reads queue lengths, draws no random numbers
++    double nodeQ = GetNodeQueueOccupancy();
++    double qn = GetNextHopQueueOccupancy(nextHop);
++    m_qsStats.decisions++;
++    m_qsStats.nodeQSum += nodeQ;
++    m_qsStats.nodeQMax = std::max(m_qsStats.nodeQMax, nodeQ);
++    if (nodeQ > 0.0)
++    {
++        m_qsStats.nodeQPos++;
++    }
++    m_qsStats.nhQSum += qn;
++    if (qn > 0.0)
++    {
++        m_qsStats.nhQPos++;
++    }
++    return qn;
++}
++
++void
++RoutingProtocol::QsDecayTick()
++{
++    m_qsStats.decayed += m_qtable.DecayStale(Simulator::Now(),
++                                             m_qsDecayThreshold.GetSeconds(),
++                                             m_qsDecayFactor,
++                                             m_qsDecayMinTx);
++    m_qsDecayEvent = Simulator::Schedule(m_qsDecayInterval, &RoutingProtocol::QsDecayTick, this);
++}
++
++
+ } // namespace qsqmaodv
+ } // namespace ns3
+diff -ruN a/qsqmaodv/model/qsqmaodv-routing-protocol.h b/qsqmaodv/model/qsqmaodv-routing-protocol.h
+--- a/qsqmaodv/model/qsqmaodv-routing-protocol.h	2026-10-06 13:11:35.090715560 +0000
++++ b/qsqmaodv/model/qsqmaodv-routing-protocol.h	2026-10-06 13:11:35.122858291 +0000
+@@ -49,6 +49,8 @@
+ {
+ 
+ class WifiMpdu;
++class WifiMacQueue;
++class Mac48Address;
+ enum WifiMacDropReason : uint8_t; // opaque enum declaration
+ 
+ namespace qsqmaodv
+@@ -206,6 +208,21 @@
+      */
+     int64_t AssignStreams(int64_t stream);
+ 
++    /// QS-QMAODV run diagnostics (read by the simulation program)
++    struct QsStats
++    {
++        uint64_t decisions{0};  ///< next-hop decisions for data packets (source + forwarders)
++        double nodeQSum{0.0};   ///< sum of node-level MAC BE occupancy at decisions
++        double nodeQMax{0.0};
++        uint64_t nodeQPos{0};   ///< decisions with node-level occupancy > 0
++        double nhQSum{0.0};     ///< sum of chosen-next-hop occupancy q_n
++        uint64_t nhQPos{0};     ///< decisions with q_n > 0
++        uint64_t fbAck{0};      ///< MAC ACK feedbacks applied
++        uint64_t fbDrop{0};     ///< MAC drop feedbacks applied
++        uint64_t decayed{0};    ///< Q entries shrunk by ACK-silence decay
++    };
++    const QsStats& GetQsStats() const { return m_qsStats; }
++
+   protected:
+     void DoInitialize() override;
+ 
+@@ -319,6 +336,31 @@
+     double m_w2{0.4};                          ///< reward weight of the one-hop delay
+     Time m_epsilonDecayInterval{Seconds(10.0)}; ///< period of the exploration decay
+     EventId m_epsilonDecayEvent;              ///< exploration decay tick
++
++    // ================= QS-QMAODV: queue-state extensions =====================
++    // Every feature is an attribute; HopByHop=true and all queue features off == QMAODV.
++    bool m_hopByHop{false};          ///< HopByHop (QMAODV: true)
++    double m_qsWq{0.10};             ///< QueueRewardWeight
++    double m_qsFailPenalty{0.5};     ///< FailurePenalty
++    bool m_qsQueueSelect{true};      ///< QueueAwareSelect
++    double m_qsBeta{0.5};            ///< QueueSelectBeta
++    bool m_qsQueueExplore{true};     ///< QueueDrivenExploration
++    double m_qsExploreFloor{0.01};   ///< ExplorationFloor
++    bool m_qsDecay{true};            ///< AckSilenceDecay
++    Time m_qsDecayThreshold{Seconds(15)};
++    double m_qsDecayFactor{0.92};
++    uint32_t m_qsDecayMinTx{3};
++    Time m_qsDecayInterval{Seconds(10)};
++    double m_qsQueueRef{20.0};       ///< QueueRefPackets (0 = MAC queue MaxSize)
++    EventId m_qsDecayEvent;
++    QsStats m_qsStats;
++    Ptr<WifiMacQueue> GetBeQueue() const;
++    bool IsQosMac() const;
++    bool LookupMac(Ipv4Address ip, Mac48Address& mac) const;
++    double GetNodeQueueOccupancy() const;                 ///< |Q_BE| / Q_ref
++    double GetNextHopQueueOccupancy(Ipv4Address nh) const; ///< |Q_BE(nh)| / Q_ref
++    double QsOnDecision(Ipv4Address nextHop);             ///< diagnostics; returns q_n
++    void QsDecayTick();
+     /// destination replies sent per (origin, RREQ id)
+     std::map<std::pair<uint32_t, uint32_t>, uint32_t> m_mcastRrepSent;
+     /// RREPs already forwarded per (origin, destination, destination sequence number)

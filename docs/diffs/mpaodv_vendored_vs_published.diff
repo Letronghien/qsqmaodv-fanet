@@ -1,0 +1,1003 @@
+diff -ruN pub/mpaodv/examples/CMakeLists.txt vendored/mpaodv/examples/CMakeLists.txt
+--- pub/mpaodv/examples/CMakeLists.txt	2026-10-06 13:11:35.774255243 +0000
++++ vendored/mpaodv/examples/CMakeLists.txt	1970-01-01 00:00:00.000000000 +0000
+@@ -1,12 +0,0 @@
+-build_lib_example(
+-  NAME manet-routing-example
+-  SOURCE_FILES manet-routing-example.cc
+-  LIBRARIES_TO_LINK
+-    ${libmpaodv}
+-    ${libaomdv}
+-    ${libaodv}
+-    ${libwifi}
+-    ${libmobility}
+-    ${libapplications}
+-    ${libflow-monitor}
+-)
+diff -ruN pub/mpaodv/examples/manet-routing-example.cc vendored/mpaodv/examples/manet-routing-example.cc
+--- pub/mpaodv/examples/manet-routing-example.cc	2026-10-06 13:11:35.774279752 +0000
++++ vendored/mpaodv/examples/manet-routing-example.cc	1970-01-01 00:00:00.000000000 +0000
+@@ -1,170 +0,0 @@
+-/*
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License version 2 as
+- * published by the Free Software Foundation;
+- *
+- * This program is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- * GNU General Public License for more details.
+- *
+- * You should have received a copy of the GNU General Public License
+- * along with this program; if not, write to the Free Software
+- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+- */
+-
+-// Ad hoc network, random waypoint, CBR flows from every node to node 0.
+-// ./ns3 run "manet-routing-example --protocol=QMAODV --nNodes=20"
+-// protocol: AODV | AOMDV | PMAODV | QMAODV | SA-QMAODV
+-
+-#include "ns3/aodv-module.h"
+-#include "ns3/aomdv-module.h"
+-#include "ns3/applications-module.h"
+-#include "ns3/core-module.h"
+-#include "ns3/flow-monitor-module.h"
+-#include "ns3/internet-module.h"
+-#include "ns3/mobility-module.h"
+-#include "ns3/mpaodv-module.h"
+-#include "ns3/network-module.h"
+-#include "ns3/wifi-module.h"
+-
+-using namespace ns3;
+-
+-int
+-main(int argc, char* argv[])
+-{
+-    std::string protocol = "QMAODV";
+-    uint32_t nNodes = 20;
+-    uint32_t maxPaths = 3;
+-    double area = 1000.0;
+-    double range = 250.0;
+-    double rate = 4.0;
+-    double simTime = 200.0;
+-    uint32_t run = 1;
+-
+-    CommandLine cmd(__FILE__);
+-    cmd.AddValue("protocol", "AODV, AOMDV, PMAODV, QMAODV or SA-QMAODV", protocol);
+-    cmd.AddValue("nNodes", "number of nodes", nNodes);
+-    cmd.AddValue("maxPaths", "PMAODV: maximum number of routes (2, 3, 4)", maxPaths);
+-    cmd.AddValue("area", "side of the square area (m)", area);
+-    cmd.AddValue("range", "radio range (m)", range);
+-    cmd.AddValue("rate", "packets/s per node", rate);
+-    cmd.AddValue("simTime", "simulation time (s)", simTime);
+-    cmd.AddValue("run", "RNG run number", run);
+-    cmd.Parse(argc, argv);
+-    RngSeedManager::SetRun(run);
+-
+-    NodeContainer nodes;
+-    nodes.Create(nNodes);
+-
+-    WifiHelper wifi;
+-    wifi.SetStandard(WIFI_STANDARD_80211b);
+-    wifi.SetRemoteStationManager("ns3::ConstantRateWifiManager",
+-                                 "DataMode",
+-                                 StringValue("DsssRate2Mbps"),
+-                                 "ControlMode",
+-                                 StringValue("DsssRate1Mbps"));
+-    YansWifiChannelHelper channel;
+-    channel.SetPropagationDelay("ns3::ConstantSpeedPropagationDelayModel");
+-    channel.AddPropagationLoss("ns3::RangePropagationLossModel", "MaxRange", DoubleValue(range));
+-    YansWifiPhyHelper phy;
+-    phy.SetChannel(channel.Create());
+-    WifiMacHelper mac;
+-    mac.SetType("ns3::AdhocWifiMac");
+-    NetDeviceContainer devices = wifi.Install(phy, mac, nodes);
+-
+-    ObjectFactory pos;
+-    pos.SetTypeId("ns3::RandomRectanglePositionAllocator");
+-    std::ostringstream u;
+-    u << "ns3::UniformRandomVariable[Min=0.0|Max=" << area << "]";
+-    pos.Set("X", StringValue(u.str()));
+-    pos.Set("Y", StringValue(u.str()));
+-    Ptr<PositionAllocator> alloc = pos.Create()->GetObject<PositionAllocator>();
+-    MobilityHelper mobility;
+-    mobility.SetMobilityModel("ns3::RandomWaypointMobilityModel",
+-                              "Speed",
+-                              StringValue("ns3::UniformRandomVariable[Min=5.0|Max=20.0]"),
+-                              "Pause",
+-                              StringValue("ns3::ConstantRandomVariable[Constant=0.0]"),
+-                              "PositionAllocator",
+-                              PointerValue(alloc));
+-    mobility.SetPositionAllocator(alloc);
+-    mobility.Install(nodes);
+-
+-    InternetStackHelper stack;
+-    AodvHelper aodv;
+-    AomdvHelper aomdv;
+-    PmaodvHelper pmaodv(maxPaths);
+-    QmaodvHelper qmaodv;
+-    SaQmaodvHelper saqmaodv;
+-    if (protocol == "AODV")
+-    {
+-        stack.SetRoutingHelper(aodv);
+-    }
+-    else if (protocol == "AOMDV")
+-    {
+-        stack.SetRoutingHelper(aomdv);
+-    }
+-    else if (protocol == "PMAODV")
+-    {
+-        stack.SetRoutingHelper(pmaodv);
+-    }
+-    else if (protocol == "QMAODV")
+-    {
+-        stack.SetRoutingHelper(qmaodv);
+-    }
+-    else if (protocol == "SA-QMAODV")
+-    {
+-        stack.SetRoutingHelper(saqmaodv);
+-    }
+-    else
+-    {
+-        NS_FATAL_ERROR("Unknown protocol " << protocol);
+-    }
+-    stack.Install(nodes);
+-    Ipv4AddressHelper address;
+-    address.SetBase("10.1.0.0", "255.255.0.0");
+-    Ipv4InterfaceContainer ifs = address.Assign(devices);
+-
+-    const uint16_t port = 9;
+-    UdpServerHelper server(port);
+-    ApplicationContainer sink = server.Install(nodes.Get(0));
+-    sink.Start(Seconds(0.0));
+-    sink.Stop(Seconds(simTime));
+-    for (uint32_t i = 1; i < nNodes; ++i)
+-    {
+-        UdpClientHelper client(ifs.GetAddress(0), port);
+-        client.SetAttribute("Interval", TimeValue(Seconds(1.0 / rate)));
+-        client.SetAttribute("PacketSize", UintegerValue(512));
+-        client.SetAttribute("MaxPackets", UintegerValue(0));
+-        ApplicationContainer app = client.Install(nodes.Get(i));
+-        app.Start(Seconds(1.0 + 0.01 * i));
+-        app.Stop(Seconds(simTime));
+-    }
+-
+-    FlowMonitorHelper fmh;
+-    Ptr<FlowMonitor> fm = fmh.InstallAll();
+-    Simulator::Stop(Seconds(simTime + 1.0));
+-    Simulator::Run();
+-
+-    fm->CheckForLostPackets();
+-    uint64_t tx = 0;
+-    uint64_t rx = 0;
+-    double delay = 0.0;
+-    auto classifier = DynamicCast<Ipv4FlowClassifier>(fmh.GetClassifier());
+-    for (const auto& [id, st] : fm->GetFlowStats())
+-    {
+-        if (classifier->FindFlow(id).destinationPort != port)
+-        {
+-            continue;
+-        }
+-        tx += st.txPackets;
+-        rx += st.rxPackets;
+-        delay += st.delaySum.GetSeconds();
+-    }
+-    std::cout << "protocol=" << protocol << " nodes=" << nNodes << " tx=" << tx << " rx=" << rx
+-              << " pdr=" << (tx ? 100.0 * rx / tx : 0.0)
+-              << "% delayMs=" << (rx ? 1000.0 * delay / rx : 0.0) << std::endl;
+-    Simulator::Destroy();
+-    return 0;
+-}
+diff -ruN pub/mpaodv/helper/mpaodv-helper.cc vendored/mpaodv/helper/mpaodv-helper.cc
+--- pub/mpaodv/helper/mpaodv-helper.cc	2026-10-06 13:11:35.774279752 +0000
++++ vendored/mpaodv/helper/mpaodv-helper.cc	2026-10-06 13:09:04.254462655 +0000
+@@ -111,21 +111,4 @@
+     Set("Policy", StringValue("QLearning"));
+ }
+ 
+-SaQmaodvHelper::SaQmaodvHelper()
+-    : MpaodvHelper()
+-{
+-    Set("Policy", StringValue("QLearning"));
+-    Set("AdaptiveEpsilon", BooleanValue(true));
+-    Set("AdaptiveAlpha", BooleanValue(true));
+-    Set("AdaptiveReward", BooleanValue(true));
+-    Set("UseRelayEnergy", BooleanValue(true));
+-    Set("Epsilon0", DoubleValue(0.3));
+-    Set("RewardW1", DoubleValue(0.5));
+-    Set("RewardW2", DoubleValue(0.4));
+-    Set("RewardW3", DoubleValue(0.1));
+-    Set("Lambda", DoubleValue(0.1));
+-    Set("SeqNoWindow", TimeValue(Seconds(10)));
+-    Set("PeriodicAdaptInterval", TimeValue(Seconds(5)));
+-}
+-
+ } // namespace ns3
+diff -ruN pub/mpaodv/helper/mpaodv-helper.h vendored/mpaodv/helper/mpaodv-helper.h
+--- pub/mpaodv/helper/mpaodv-helper.h	2026-10-06 13:11:35.774343744 +0000
++++ vendored/mpaodv/helper/mpaodv-helper.h	2026-10-06 13:09:04.254338695 +0000
+@@ -103,16 +103,6 @@
+     QmaodvHelper();
+ };
+ 
+-/**
+- * \ingroup mpaodv
+- * \brief SA-QMAODV: self-adaptive QMAODV (adaptive exploration, learning rate and reward).
+- */
+-class SaQmaodvHelper : public MpaodvHelper
+-{
+-  public:
+-    SaQmaodvHelper();
+-};
+-
+ } // namespace ns3
+ 
+ #endif /* MPAODV_HELPER_H */
+diff -ruN pub/mpaodv/model/mpaodv-qtable.cc vendored/mpaodv/model/mpaodv-qtable.cc
+--- pub/mpaodv/model/mpaodv-qtable.cc	2026-10-06 13:11:35.774382632 +0000
++++ vendored/mpaodv/model/mpaodv-qtable.cc	2026-10-06 13:09:04.247556847 +0000
+@@ -37,21 +37,7 @@
+       m_epsilon(0.3),
+       m_w1(0.5),
+       m_w2(0.4),
+-      m_w3(0.1),
+-      m_lowEnergyMode(false),
+-      m_epsilonMin(0.10),
+-      m_epsilonMax(0.50),
+-      m_epsilonStep(0.02),
+-      m_epsilonBump(0.20),
+-      m_lambda(0.1),
+-      m_seqNoWindow(Seconds(10.0)),
+-      m_lowEnergyThresh(0.20),
+-      m_w1Normal(0.5),
+-      m_w2Normal(0.4),
+-      m_w3Normal(0.1),
+-      m_w1Low(0.1),
+-      m_w2Low(0.1),
+-      m_w3Low(0.8)
++      m_epsilonStep(0.02)
+ {
+     m_uniform = CreateObject<UniformRandomVariable>();
+ }
+@@ -81,133 +67,27 @@
+ }
+ 
+ void
+-QTable::SetRewardWeights(double w1, double w2, double w3)
++QTable::SetRewardWeights(double w1, double w2)
+ {
+     m_w1 = w1;
+     m_w2 = w2;
+-    m_w3 = w3;
+-    m_w1Normal = w1;
+-    m_w2Normal = w2;
+-    m_w3Normal = w3;
+-}
+-
+-void
+-QTable::SetAdaptiveFlags(bool adaptEpsilon, bool adaptAlpha, bool adaptReward)
+-{
+-    m_adaptEpsilon = adaptEpsilon;
+-    m_adaptAlpha = adaptAlpha;
+-    m_adaptReward = adaptReward;
+-}
+-
+-void
+-QTable::SetLowEnergyThreshold(double frac)
+-{
+-    m_lowEnergyThresh = frac;
+-}
+-
+-void
+-QTable::SetSensitivityLambda(double lambda)
+-{
+-    m_lambda = lambda;
+-}
+-
+-void
+-QTable::SetSeqNoWindow(Time window)
+-{
+-    m_seqNoWindow = window;
+-}
+-
+-void
+-QTable::OnRouteError()
+-{
+-    if (!m_adaptEpsilon)
+-    {
+-        return;
+-    }
+-    m_epsilon = std::min(m_epsilonMax, m_epsilon + m_epsilonBump);
+ }
+ 
+ void
+ QTable::PeriodicEpsilonDecay()
+ {
+-    const double floorEps = m_adaptEpsilon ? m_epsilonMin : 0.0;
+-    m_epsilon = std::max(floorEps, m_epsilon - m_epsilonStep);
+-}
+-
+-void
+-QTable::RecordSeqNoUpdate()
+-{
+-    m_seqEvents.push_back(Simulator::Now());
+-    PurgeSeqNoEvents();
+-}
+-
+-void
+-QTable::PurgeSeqNoEvents()
+-{
+-    const Time threshold = Simulator::Now() - m_seqNoWindow;
+-    while (!m_seqEvents.empty() && m_seqEvents.front() < threshold)
+-    {
+-        m_seqEvents.pop_front();
+-    }
+-}
+-
+-uint32_t
+-QTable::GetDeltaSeq() const
+-{
+-    const Time threshold = Simulator::Now() - m_seqNoWindow;
+-    while (!m_seqEvents.empty() && m_seqEvents.front() < threshold)
+-    {
+-        m_seqEvents.pop_front();
+-    }
+-    return static_cast<uint32_t>(m_seqEvents.size());
+-}
+-
+-void
+-QTable::RecomputeAdaptiveAlpha()
+-{
+-    if (!m_adaptAlpha)
+-    {
+-        return;
+-    }
+-    uint32_t dSeq = GetDeltaSeq();
+-    m_alpha = 0.1 + 0.8 * (1.0 - std::exp(-m_lambda * static_cast<double>(dSeq)));
+-}
+-
+-void
+-QTable::RecomputeAdaptiveRewardWeights(double energyFraction)
+-{
+-    if (!m_adaptReward)
+-    {
+-        return;
+-    }
+-    bool lowEnergyNow = (energyFraction < m_lowEnergyThresh);
+-    if (lowEnergyNow != m_lowEnergyMode)
+-    {
+-        m_lowEnergyMode = lowEnergyNow;
+-        if (lowEnergyNow)
+-        {
+-            m_w1 = m_w1Low;
+-            m_w2 = m_w2Low;
+-            m_w3 = m_w3Low;
+-        }
+-        else
+-        {
+-            m_w1 = m_w1Normal;
+-            m_w2 = m_w2Normal;
+-            m_w3 = m_w3Normal;
+-        }
+-    }
++    m_epsilon = std::max(0.0, m_epsilon - m_epsilonStep);
+ }
+ 
+ double
+-QTable::ComputeReward(double ackSuccess, double delaySec, double energyFrac) const
++QTable::ComputeReward(double ackSuccess, double delaySec) const
+ {
+     const double oneMs = 0.001;
+     if (delaySec < 0.0)
+     {
+         delaySec = 0.0;
+     }
+-    return m_w1 * ackSuccess + m_w2 * (1.0 / (1.0 + delaySec / oneMs)) + m_w3 * energyFrac;
++    return m_w1 * ackSuccess + m_w2 * (1.0 / (1.0 + delaySec / oneMs));
+ }
+ 
+ std::vector<QRecord>::iterator
+@@ -476,10 +356,9 @@
+ QTable::UpdateQValue(Ipv4Address dst,
+                      Ipv4Address nextHop,
+                      double ackSuccess,
+-                     double delaySec,
+-                     double energyFraction)
++                     double delaySec)
+ {
+-    double reward = ComputeReward(ackSuccess, delaySec, energyFraction);
++    double reward = ComputeReward(ackSuccess, delaySec);
+     auto it = m_records.find(dst);
+     if (it == m_records.end())
+     {
+@@ -537,7 +416,6 @@
+ QTable::Clear()
+ {
+     m_records.clear();
+-    m_seqEvents.clear();
+ }
+ 
+ void
+diff -ruN pub/mpaodv/model/mpaodv-qtable.h vendored/mpaodv/model/mpaodv-qtable.h
+--- pub/mpaodv/model/mpaodv-qtable.h	2026-10-06 13:11:35.774382632 +0000
++++ vendored/mpaodv/model/mpaodv-qtable.h	2026-10-06 13:09:04.255535169 +0000
+@@ -65,12 +65,9 @@
+  * \ingroup mpaodv
+  * \brief Routes per destination (at most MaxPaths), next-hop selection and Q-learning.
+  *
+- * Selection: PMAODV, p_i = (1/HC_i) / sum_k (1/HC_k); QMAODV, SA-QMAODV, epsilon-greedy on Q.
++ * Selection: PMAODV, p_i = (1/HC_i) / sum_k (1/HC_k); QMAODV, epsilon-greedy on Q.
+  * Initial Q (QMAODV Eq. 1): Q_i = (1/HC_i) / sum_k (1/HC_k).
+- * Update: Q <- (1 - alpha) Q + alpha (r + gamma max Q), r = w1 ACK + w2 / (1 + delay_ms) + w3 E.
+- * SA-QMAODV: epsilon <- min(0.5, epsilon + 0.2) on a route error, max(0.1, epsilon - 0.02) per
+- * tick; alpha = 0.1 + 0.8 (1 - exp(-lambda DeltaSeq)); weights (0.5, 0.4, 0.1), or
+- * (0.1, 0.1, 0.8) when the residual energy of the node is below the threshold.
++ * Update: Q <- (1 - alpha) Q + alpha (r + gamma max Q), r = w1 ACK + w2 / (1 + delay_ms).
+  */
+ class QTable
+ {
+@@ -93,15 +90,8 @@
+     /**
+      * \param w1 weight of the MAC acknowledgement
+      * \param w2 weight of the one-hop delay term
+-     * \param w3 weight of the residual energy
+      */
+-    void SetRewardWeights(double w1, double w2, double w3 = 0.0);
+-    /**
+-     * \param adaptEpsilon adaptive exploration rate
+-     * \param adaptAlpha adaptive learning rate
+-     * \param adaptReward energy-dependent reward weights
+-     */
+-    void SetAdaptiveFlags(bool adaptEpsilon, bool adaptAlpha, bool adaptReward);
++    void SetRewardWeights(double w1, double w2);
+ 
+     /// \param on true: probabilistic selection (PMAODV); false: epsilon-greedy
+     void SetProbabilistic(bool on)
+@@ -109,22 +99,8 @@
+         m_probabilistic = on;
+     }
+ 
+-    /// Route error: raise the exploration rate (adaptive exploration only).
+-    void OnRouteError();
+     /// Periodic decay of the exploration rate.
+     void PeriodicEpsilonDecay();
+-    /// Count a destination sequence number increase.
+-    void RecordSeqNoUpdate();
+-    /// Recompute the learning rate from DeltaSeq (adaptive learning rate only).
+-    void RecomputeAdaptiveAlpha();
+-    /// \param energyFraction residual energy fraction of this node
+-    void RecomputeAdaptiveRewardWeights(double energyFraction);
+-    /// \param frac residual energy fraction of the low-energy weights
+-    void SetLowEnergyThreshold(double frac);
+-    /// \param lambda sensitivity of the adaptive learning rate
+-    void SetSensitivityLambda(double lambda);
+-    /// \param window window of DeltaSeq
+-    void SetSeqNoWindow(Time window);
+ 
+     /// \return learning rate
+     double GetAlpha() const
+@@ -138,8 +114,6 @@
+         return m_epsilon;
+     }
+ 
+-    /// \return number of sequence number increases in the window
+-    uint32_t GetDeltaSeq() const;
+ 
+     /**
+      * Add an alternate route (replaces the longest one when full).
+@@ -185,13 +159,11 @@
+      * \param nextHop next hop
+      * \param ackSuccess 1 if acknowledged, 0 otherwise
+      * \param delaySec one-hop delay (s)
+-     * \param energyFraction residual energy used in the reward
+      */
+     void UpdateQValue(Ipv4Address dst,
+                       Ipv4Address nextHop,
+                       double ackSuccess,
+-                      double delaySec,
+-                      double energyFraction = 1.0);
++                      double delaySec);
+ 
+     /// \return number of stored routes
+     uint32_t Size() const;
+@@ -226,12 +198,9 @@
+     /**
+      * \param ackSuccess 1 if acknowledged, 0 otherwise
+      * \param delaySec one-hop delay (s)
+-     * \param energyFrac residual energy fraction
+      * \return reward
+      */
+-    double ComputeReward(double ackSuccess, double delaySec, double energyFrac) const;
+-    /// Remove sequence number events older than the window.
+-    void PurgeSeqNoEvents();
++    double ComputeReward(double ackSuccess, double delaySec) const;
+ 
+     std::map<Ipv4Address, std::vector<QRecord>> m_records; ///< routes per destination
+     uint32_t m_maxPaths;                                   ///< maximum routes per destination
+@@ -240,26 +209,8 @@
+     double m_epsilon;                                      ///< exploration rate
+     double m_w1;                                           ///< weight of the acknowledgement
+     double m_w2;                                           ///< weight of the delay term
+-    double m_w3;                                           ///< weight of the residual energy
+-    bool m_lowEnergyMode;                                  ///< low-energy weights in use
+-    bool m_adaptEpsilon{false};                            ///< adaptive exploration rate
+-    bool m_adaptAlpha{false};                              ///< adaptive learning rate
+-    bool m_adaptReward{false};                             ///< energy-dependent weights
+     bool m_probabilistic{false};                           ///< PMAODV selection
+-    double m_epsilonMin;                                   ///< exploration floor (adaptive)
+-    double m_epsilonMax;                                   ///< exploration ceiling (adaptive)
+     double m_epsilonStep;                                  ///< periodic decay
+-    double m_epsilonBump;                                  ///< increase on a route error
+-    double m_lambda;                                       ///< sensitivity of alpha
+-    Time m_seqNoWindow;                                    ///< window of DeltaSeq
+-    double m_lowEnergyThresh;                              ///< low-energy threshold
+-    double m_w1Normal;                                     ///< normal weight w1
+-    double m_w2Normal;                                     ///< normal weight w2
+-    double m_w3Normal;                                     ///< normal weight w3
+-    double m_w1Low;                                        ///< low-energy weight w1
+-    double m_w2Low;                                        ///< low-energy weight w2
+-    double m_w3Low;                                        ///< low-energy weight w3
+-    mutable std::deque<Time> m_seqEvents;                  ///< sequence number increase times
+     Ptr<UniformRandomVariable> m_uniform;                  ///< selection random variable
+ };
+ 
+diff -ruN pub/mpaodv/model/mpaodv-routing-protocol.cc vendored/mpaodv/model/mpaodv-routing-protocol.cc
+--- pub/mpaodv/model/mpaodv-routing-protocol.cc	2026-10-06 13:11:35.774382632 +0000
++++ vendored/mpaodv/model/mpaodv-routing-protocol.cc	2026-10-06 13:09:04.256803097 +0000
+@@ -37,8 +37,6 @@
+ #include "ns3/adhoc-wifi-mac.h"
+ #include "ns3/boolean.h"
+ #include "ns3/double.h"
+-#include "ns3/energy-source-container.h"
+-#include "ns3/basic-energy-source.h"
+ #include "ns3/inet-socket-address.h"
+ #include "ns3/log.h"
+ #include "ns3/pointer.h"
+@@ -62,49 +60,6 @@
+ 
+ namespace mpaodv
+ {
+-/**
+- * \ingroup mpaodv
+- * \brief Residual energy fraction of the sender, carried by control packets (SA-QMAODV).
+- */
+-class NeighborInfoTag : public Tag
+-{
+-  public:
+-    NeighborInfoTag(double energy = 1.0)
+-        : m_energy(static_cast<float>(energy))
+-    {
+-    }
+-
+-    static TypeId GetTypeId()
+-    {
+-        static TypeId tid = TypeId("ns3::mpaodv::NeighborInfoTag")
+-                                .SetParent<Tag>()
+-                                .SetGroupName("Mpaodv")
+-                                .AddConstructor<NeighborInfoTag>();
+-        return tid;
+-    }
+-
+-    TypeId GetInstanceTypeId() const override { return GetTypeId(); }
+-    uint32_t GetSerializedSize() const override { return 4; }
+-    void Serialize(TagBuffer i) const override
+-    {
+-        uint32_t bits;
+-        std::memcpy(&bits, &m_energy, 4);
+-        i.WriteU32(bits);
+-    }
+-    void Deserialize(TagBuffer i) override
+-    {
+-        uint32_t bits = i.ReadU32();
+-        std::memcpy(&m_energy, &bits, 4);
+-    }
+-    void Print(std::ostream& os) const override { os << "NeighborInfoTag: E=" << m_energy; }
+-    double GetEnergy() const { return m_energy; }
+-
+-  private:
+-    float m_energy;
+-};
+-
+-NS_OBJECT_ENSURE_REGISTERED(NeighborInfoTag);
+-
+ NS_OBJECT_ENSURE_REGISTERED(RoutingProtocol);
+ 
+ /// UDP Port for MPAODV control traffic
+@@ -329,7 +284,7 @@
+             .SetGroupName("Mpaodv")
+             .AddConstructor<RoutingProtocol>()
+             .AddAttribute("Policy",
+-                          "Next-hop selection: QLearning (QMAODV, SA-QMAODV) or Probabilistic "
++                          "Next-hop selection: QLearning (QMAODV) or Probabilistic "
+                           "(PMAODV, p proportional to 1/HopCount)",
+                           StringValue("QLearning"),
+                           MakeStringAccessor(&RoutingProtocol::m_policy),
+@@ -341,7 +296,7 @@
+                                                &RoutingProtocol::GetMaxPaths),
+                           MakeUintegerChecker<uint32_t>(1))
+             .AddAttribute("Alpha0",
+-                          "Learning rate (initial value when AdaptiveAlpha is true)",
++                          "Learning rate",
+                           DoubleValue(0.5),
+                           MakeDoubleAccessor(&RoutingProtocol::m_alpha0),
+                           MakeDoubleChecker<double>(0.0, 1.0))
+@@ -365,53 +320,10 @@
+                           DoubleValue(0.4),
+                           MakeDoubleAccessor(&RoutingProtocol::m_w2),
+                           MakeDoubleChecker<double>())
+-            .AddAttribute("RewardW3",
+-                          "Reward weight of the residual energy",
+-                          DoubleValue(0.0),
+-                          MakeDoubleAccessor(&RoutingProtocol::m_w3),
+-                          MakeDoubleChecker<double>())
+-            .AddAttribute("AdaptiveEpsilon",
+-                          "Exploration rate raised by 0.2 on route errors (max 0.5) and decayed "
+-                          "by 0.02 per tick (min 0.1); false: decayed by 0.02 per tick down to 0",
+-                          BooleanValue(false),
+-                          MakeBooleanAccessor(&RoutingProtocol::m_adaptEpsilon),
+-                          MakeBooleanChecker())
+-            .AddAttribute("AdaptiveAlpha",
+-                          "Learning rate 0.1 + 0.8 (1 - exp(-Lambda * DeltaSeq)); false: Alpha0",
+-                          BooleanValue(false),
+-                          MakeBooleanAccessor(&RoutingProtocol::m_adaptAlpha),
+-                          MakeBooleanChecker())
+-            .AddAttribute("AdaptiveReward",
+-                          "Reward weights (0.5, 0.4, 0.1), (0.1, 0.1, 0.8) below "
+-                          "LowEnergyThreshold; false: RewardW1..W3",
+-                          BooleanValue(false),
+-                          MakeBooleanAccessor(&RoutingProtocol::m_adaptReward),
+-                          MakeBooleanChecker())
+-            .AddAttribute("UseRelayEnergy",
+-                          "Energy term of the reward: residual energy of the next hop (true) or "
+-                          "of this node (false)",
+-                          BooleanValue(false),
+-                          MakeBooleanAccessor(&RoutingProtocol::m_useRelayEnergy),
+-                          MakeBooleanChecker())
+-            .AddAttribute("Lambda",
+-                          "Sensitivity of the adaptive learning rate",
+-                          DoubleValue(0.1),
+-                          MakeDoubleAccessor(&RoutingProtocol::m_lambda),
+-                          MakeDoubleChecker<double>())
+-            .AddAttribute("SeqNoWindow",
+-                          "Window of DeltaSeq (destination sequence number increases)",
++            .AddAttribute("EpsilonDecayInterval",
++                          "Period of the exploration decay",
+                           TimeValue(Seconds(10.0)),
+-                          MakeTimeAccessor(&RoutingProtocol::m_seqNoWindow),
+-                          MakeTimeChecker())
+-            .AddAttribute("LowEnergyThreshold",
+-                          "Residual energy fraction below which the low-energy weights are used",
+-                          DoubleValue(0.20),
+-                          MakeDoubleAccessor(&RoutingProtocol::m_lowEnergyThreshold),
+-                          MakeDoubleChecker<double>(0.0, 1.0))
+-            .AddAttribute("PeriodicAdaptInterval",
+-                          "Period of the exploration decay and of the adaptation",
+-                          TimeValue(Seconds(10.0)),
+-                          MakeTimeAccessor(&RoutingProtocol::m_periodicAdaptInterval),
++                          MakeTimeAccessor(&RoutingProtocol::m_epsilonDecayInterval),
+                           MakeTimeChecker())
+             .AddAttribute("HelloInterval",
+                           "HELLO messages emission interval.",
+@@ -626,14 +538,10 @@
+                     "Policy must be QLearning or Probabilistic, got " << m_policy);
+     m_qtable.SetMaxPaths(m_maxPaths);
+     m_qtable.SetLearningParameters(m_alpha0, m_gamma, m_epsilon0);
+-    m_qtable.SetRewardWeights(m_w1, m_w2, m_w3);
+-    m_qtable.SetAdaptiveFlags(m_adaptEpsilon, m_adaptAlpha, m_adaptReward);
++    m_qtable.SetRewardWeights(m_w1, m_w2);
+     m_qtable.SetProbabilistic(m_policy == "Probabilistic");
+-    m_qtable.SetSeqNoWindow(m_seqNoWindow);
+-    m_qtable.SetSensitivityLambda(m_lambda);
+-    m_qtable.SetLowEnergyThreshold(m_lowEnergyThreshold);
+-    m_periodicAdaptEvent =
+-        Simulator::Schedule(m_periodicAdaptInterval, &RoutingProtocol::PeriodicAdaptiveTick, this);
++    m_epsilonDecayEvent =
++        Simulator::Schedule(m_epsilonDecayInterval, &RoutingProtocol::EpsilonDecayTick, this);
+ 
+     NS_LOG_FUNCTION(this);
+     if (m_enableHello)
+@@ -1098,29 +1006,6 @@
+     return uh.GetDestinationPort() != MPAODV_PORT && uh.GetSourcePort() != MPAODV_PORT;
+ }
+ 
+-Ptr<Packet>
+-RoutingProtocol::AttachNbInfo(Ptr<Packet> p)
+-{
+-    if (!m_useRelayEnergy)
+-    {
+-        return p;
+-    }
+-    NeighborInfoTag nbi(GetEnergyFraction());
+-    p->ReplacePacketTag(nbi);
+-    return p;
+-}
+-
+-double
+-RoutingProtocol::RelayEnergy(Ipv4Address nextHop) const
+-{
+-    if (!m_useRelayEnergy)
+-    {
+-        return GetEnergyFraction();
+-    }
+-    auto it = m_nbEnergy.find(nextHop);
+-    return (it != m_nbEnergy.end()) ? it->second : 1.0;
+-}
+-
+ void
+ RoutingProtocol::MacFeedback(Ptr<const WifiMpdu> mpdu, bool acked)
+ {
+@@ -1138,8 +1023,7 @@
+     m_qtable.UpdateQValue(fb.GetDst(),
+                           fb.GetNextHop(),
+                           acked ? 1.0 : 0.0,
+-                          delay,
+-                          RelayEnergy(fb.GetNextHop()));
++                          delay);
+ }
+ 
+ void
+@@ -1513,7 +1397,7 @@
+ void
+ RoutingProtocol::SendTo(Ptr<Socket> socket, Ptr<Packet> packet, Ipv4Address destination)
+ {
+-    socket->SendTo(AttachNbInfo(packet), 0, InetSocketAddress(destination, MPAODV_PORT));
++    socket->SendTo(packet, 0, InetSocketAddress(destination, MPAODV_PORT));
+ }
+ 
+ void
+@@ -1555,14 +1439,6 @@
+     InetSocketAddress inetSourceAddr = InetSocketAddress::ConvertFrom(sourceAddress);
+     Ipv4Address sender = inetSourceAddr.GetIpv4();
+     Ipv4Address receiver;
+-    if (m_useRelayEnergy)
+-    {
+-        NeighborInfoTag nbi;
+-        if (packet->PeekPacketTag(nbi))
+-        {
+-            m_nbEnergy[sender] = nbi.GetEnergy();
+-        }
+-    }
+ 
+     if (m_socketAddresses.find(socket) != m_socketAddresses.end())
+     {
+@@ -1758,7 +1634,6 @@
+             /*nextHop=*/src,
+             /*lifetime=*/Time((2 * m_netTraversalTime - 2 * hop * m_nodeTraversalTime)));
+         m_routingTable.AddRoute(newEntry);
+-        NoteSeqNoIncrease();
+     }
+     else
+     {
+@@ -1767,13 +1642,11 @@
+             if (int32_t(rreqHeader.GetOriginSeqno()) - int32_t(toOrigin.GetSeqNo()) > 0)
+             {
+                 toOrigin.SetSeqNo(rreqHeader.GetOriginSeqno());
+-                NoteSeqNoIncrease();
+             }
+         }
+         else
+         {
+             toOrigin.SetSeqNo(rreqHeader.GetOriginSeqno());
+-            NoteSeqNoIncrease();
+         }
+         toOrigin.SetValidSeqNo(true);
+         toOrigin.SetNextHop(src);
+@@ -1935,7 +1808,7 @@
+     packet->AddHeader(tHeader);
+     Ptr<Socket> socket = FindSocketWithInterfaceAddress(toOrigin.GetInterface());
+     NS_ASSERT(socket);
+-    socket->SendTo(AttachNbInfo(packet), 0, InetSocketAddress(toOrigin.GetNextHop(), MPAODV_PORT));
++    socket->SendTo(packet, 0, InetSocketAddress(toOrigin.GetNextHop(), MPAODV_PORT));
+ }
+ 
+ void
+@@ -1976,7 +1849,7 @@
+     packet->AddHeader(tHeader);
+     Ptr<Socket> socket = FindSocketWithInterfaceAddress(toOrigin.GetInterface());
+     NS_ASSERT(socket);
+-    socket->SendTo(AttachNbInfo(packet), 0, InetSocketAddress(toOrigin.GetNextHop(), MPAODV_PORT));
++    socket->SendTo(packet, 0, InetSocketAddress(toOrigin.GetNextHop(), MPAODV_PORT));
+ 
+     // Generating gratuitous RREPs
+     if (gratRep)
+@@ -1997,7 +1870,7 @@
+         Ptr<Socket> socket = FindSocketWithInterfaceAddress(toDst.GetInterface());
+         NS_ASSERT(socket);
+         NS_LOG_LOGIC("Send gratuitous RREP " << packet->GetUid());
+-        socket->SendTo(AttachNbInfo(packetToDst), 0, InetSocketAddress(toDst.GetNextHop(), MPAODV_PORT));
++        socket->SendTo(packetToDst, 0, InetSocketAddress(toDst.GetNextHop(), MPAODV_PORT));
+     }
+ }
+ 
+@@ -2017,7 +1890,7 @@
+     m_routingTable.LookupRoute(neighbor, toNeighbor);
+     Ptr<Socket> socket = FindSocketWithInterfaceAddress(toNeighbor.GetInterface());
+     NS_ASSERT(socket);
+-    socket->SendTo(AttachNbInfo(packet), 0, InetSocketAddress(neighbor, MPAODV_PORT));
++    socket->SendTo(packet, 0, InetSocketAddress(neighbor, MPAODV_PORT));
+ }
+ 
+ void
+@@ -2072,14 +1945,12 @@
+         if (!toDst.GetValidSeqNo())
+         {
+             m_routingTable.Update(newEntry);
+-            NoteSeqNoIncrease();
+         }
+         // (ii)the Destination Sequence Number in the RREP is greater than the node's copy of the
+         // destination sequence number and the known value is valid,
+         else if ((int32_t(rrepHeader.GetDstSeqno()) - int32_t(toDst.GetSeqNo())) > 0)
+         {
+             m_routingTable.Update(newEntry);
+-            NoteSeqNoIncrease();
+         }
+         else
+         {
+@@ -2101,7 +1972,6 @@
+         // The forward route for this destination is created if it does not already exist.
+         NS_LOG_LOGIC("add new route");
+         m_routingTable.AddRoute(newEntry);
+-        NoteSeqNoIncrease();
+     }
+ 
+     m_qtable.EnsureRecord(newEntry);
+@@ -2195,7 +2065,7 @@
+         copy->AddHeader(th);
+         Ptr<Socket> sk = FindSocketWithInterfaceAddress(r.GetInterface());
+         NS_ASSERT(sk);
+-        sk->SendTo(AttachNbInfo(copy), 0, InetSocketAddress(r.GetNextHop(), MPAODV_PORT));
++        sk->SendTo(copy, 0, InetSocketAddress(r.GetNextHop(), MPAODV_PORT));
+     }
+ }
+ 
+@@ -2311,10 +2181,6 @@
+         SendRerrMessage(packet, precursors);
+     }
+     m_routingTable.InvalidateRoutesWithDst(unreachable);
+-    if (!unreachable.empty())
+-    {
+-        m_qtable.OnRouteError();
+-    }
+ }
+ 
+ void
+@@ -2483,7 +2349,6 @@
+         return;
+     }
+     toNextHop.GetPrecursors(precursors);
+-    m_qtable.OnRouteError();
+     rerrHeader.AddUnDestination(nextHop, toNextHop.GetSeqNo());
+     m_routingTable.GetListOfDestinationWithNextHop(nextHop, unreachable);
+     for (auto i = unreachable.begin(); i != unreachable.end();)
+@@ -2555,7 +2420,7 @@
+         Ptr<Socket> socket = FindSocketWithInterfaceAddress(toOrigin.GetInterface());
+         NS_ASSERT(socket);
+         NS_LOG_LOGIC("Unicast RERR to the source of the data transmission");
+-        socket->SendTo(AttachNbInfo(packet), 0, InetSocketAddress(toOrigin.GetNextHop(), MPAODV_PORT));
++        socket->SendTo(packet, 0, InetSocketAddress(toOrigin.GetNextHop(), MPAODV_PORT));
+     }
+     else
+     {
+@@ -2575,7 +2440,7 @@
+             {
+                 destination = iface.GetBroadcast();
+             }
+-            socket->SendTo(AttachNbInfo(packet->Copy()), 0, InetSocketAddress(destination, MPAODV_PORT));
++            socket->SendTo(packet->Copy(), 0, InetSocketAddress(destination, MPAODV_PORT));
+         }
+     }
+ }
+@@ -2726,43 +2591,12 @@
+     return m_maxPaths;
+ }
+ 
+-double
+-RoutingProtocol::GetEnergyFraction() const
+-{
+-    Ptr<Node> node = m_ipv4 ? m_ipv4->GetObject<Node>() : nullptr;
+-    if (!node)
+-    {
+-        return 1.0;
+-    }
+-    Ptr<energy::EnergySourceContainer> esc = node->GetObject<energy::EnergySourceContainer>();
+-    if (!esc || esc->GetN() == 0)
+-    {
+-        return 1.0;
+-    }
+-    Ptr<energy::BasicEnergySource> src = DynamicCast<energy::BasicEnergySource>(esc->Get(0));
+-    if (!src)
+-    {
+-        return 1.0;
+-    }
+-    double initE = src->GetInitialEnergy();
+-    double remE = src->GetRemainingEnergy();
+-    return (initE > 0.0) ? std::min(1.0, std::max(0.0, remE / initE)) : 1.0;
+-}
+-
+-void
+-RoutingProtocol::NoteSeqNoIncrease()
+-{
+-    m_qtable.RecordSeqNoUpdate();
+-}
+-
+ void
+-RoutingProtocol::PeriodicAdaptiveTick()
++RoutingProtocol::EpsilonDecayTick()
+ {
+     m_qtable.PeriodicEpsilonDecay();
+-    m_qtable.RecomputeAdaptiveAlpha();
+-    m_qtable.RecomputeAdaptiveRewardWeights(GetEnergyFraction());
+-    m_periodicAdaptEvent =
+-        Simulator::Schedule(m_periodicAdaptInterval, &RoutingProtocol::PeriodicAdaptiveTick, this);
++    m_epsilonDecayEvent =
++        Simulator::Schedule(m_epsilonDecayInterval, &RoutingProtocol::EpsilonDecayTick, this);
+ }
+ 
+ } // namespace mpaodv
+diff -ruN pub/mpaodv/model/mpaodv-routing-protocol.h vendored/mpaodv/model/mpaodv-routing-protocol.h
+--- pub/mpaodv/model/mpaodv-routing-protocol.h	2026-10-06 13:11:35.774382632 +0000
++++ vendored/mpaodv/model/mpaodv-routing-protocol.h	2026-10-06 13:09:04.256103446 +0000
+@@ -56,7 +56,7 @@
+ /**
+  * \ingroup mpaodv
+  *
+- * \brief Multipath AODV core of PMAODV, QMAODV and SA-QMAODV
++ * \brief Multipath AODV core of PMAODV and QMAODV
+  */
+ class RoutingProtocol : public Ipv4RoutingProtocol
+ {
+@@ -219,23 +219,8 @@
+      * \return the maximum number of routes per destination
+      */
+     uint32_t GetMaxPaths() const;
+-    /// Periodic adaptation: epsilon decay, alpha recomputation, reward weights.
+-    void PeriodicAdaptiveTick();
+-    /**
+-     * \return residual energy fraction of this node (1 without an energy source)
+-     */
+-    double GetEnergyFraction() const;
+-    /**
+-     * Attach the residual energy of this node to an outgoing control packet.
+-     * \param p the packet
+-     * \return the packet
+-     */
+-    Ptr<Packet> AttachNbInfo(Ptr<Packet> p);
+-    /**
+-     * \param nextHop next hop
+-     * \return energy value used in the reward for nextHop
+-     */
+-    double RelayEnergy(Ipv4Address nextHop) const;
++    /// Periodic decay of the exploration rate.
++    void EpsilonDecayTick();
+     /**
+      * \param p packet
+      * \return true for routing control packets
+@@ -246,8 +231,6 @@
+      * \return true if the frame carries application data
+      */
+     static bool IsDataFrame(Ptr<const Packet> mpduPacket);
+-    /// Count an increase of a stored destination sequence number (adaptive alpha).
+-    void NoteSeqNoIncrease();
+     /**
+      * Notify that an MPDU was dropped.
+      *
+@@ -334,17 +317,8 @@
+     double m_epsilon0{0.5};                    ///< initial exploration rate
+     double m_w1{0.6};                          ///< reward weight of the MAC ACK
+     double m_w2{0.4};                          ///< reward weight of the one-hop delay
+-    double m_w3{0.0};                          ///< reward weight of the residual energy
+-    bool m_adaptEpsilon{false};                ///< SA-QMAODV adaptive exploration
+-    bool m_adaptAlpha{false};                  ///< SA-QMAODV adaptive learning rate
+-    bool m_adaptReward{false};                 ///< SA-QMAODV energy-dependent reward weights
+-    bool m_useRelayEnergy{false};              ///< energy term = residual energy of the next hop
+-    double m_lambda{0.1};                      ///< sensitivity of the adaptive learning rate
+-    Time m_seqNoWindow{Seconds(10.0)};         ///< window of the sequence number count
+-    double m_lowEnergyThreshold{0.20};         ///< residual energy of the low-energy weights
+-    Time m_periodicAdaptInterval{Seconds(10.0)}; ///< period of the adaptation tick
+-    EventId m_periodicAdaptEvent;              ///< adaptation tick
+-    std::map<Ipv4Address, double> m_nbEnergy;  ///< last residual energy heard per neighbour
++    Time m_epsilonDecayInterval{Seconds(10.0)}; ///< period of the exploration decay
++    EventId m_epsilonDecayEvent;              ///< exploration decay tick
+     /// destination replies sent per (origin, RREQ id)
+     std::map<std::pair<uint32_t, uint32_t>, uint32_t> m_mcastRrepSent;
+     /// RREPs already forwarded per (origin, destination, destination sequence number)

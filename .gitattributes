@@ -1,0 +1,6 @@
+# Files excluded from the release archive (git archive / GitHub release zip):
+# development history and the superseded v1 study stay in the repository but are not
+# part of the artefact submitted with the article.
+legacy/            export-ignore
+docs/internal/     export-ignore
+.gitattributes     export-ignore

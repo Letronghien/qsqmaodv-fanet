@@ -1,6 +1,6 @@
 # Porting notes: ns-3.40 -> ns-3.48
 
-Checked by compiling every source file of `src/qs2maodv` and `scratch/qsq-compare.cc`
+Checked by compiling every source file of `src/qsqmaodv`, `src/qlaodv` and `scratch/qsq-compare.cc`
 against the ns-3.48 headers (C++23, syntax check). Changes that were needed:
 
 | Area | ns-3.40 | ns-3.48 | Where |

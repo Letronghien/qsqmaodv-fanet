@@ -1,0 +1,594 @@
+diff -ruN a/qlaodv/model/qlaodv-packet.cc b/qlaodv/model/qlaodv-packet.cc
+--- a/qlaodv/model/qlaodv-packet.cc	2026-10-06 13:11:35.436285330 +0000
++++ b/qlaodv/model/qlaodv-packet.cc	2026-10-06 13:11:35.454374233 +0000
+@@ -321,7 +321,7 @@
+ uint32_t
+ RrepHeader::GetSerializedSize() const
+ {
+-    return 19;
++    return 27; // QL-AODV: 19 + 2 x 4-byte buffer fields
+ }
+ 
+ void
+@@ -334,6 +334,8 @@
+     i.WriteHtonU32(m_dstSeqNo);
+     WriteTo(i, m_origin);
+     i.WriteHtonU32(m_lifeTime);
++    i.WriteHtonU32(m_totalBuffer); // QL-AODV
++    i.WriteHtonU32(m_maxBuffer);   // QL-AODV
+ }
+ 
+ uint32_t
+@@ -348,6 +350,8 @@
+     m_dstSeqNo = i.ReadNtohU32();
+     ReadFrom(i, m_origin);
+     m_lifeTime = i.ReadNtohU32();
++    m_totalBuffer = i.ReadNtohU32(); // QL-AODV
++    m_maxBuffer = i.ReadNtohU32();   // QL-AODV
+ 
+     uint32_t dist = i.GetDistanceFrom(start);
+     NS_ASSERT(dist == GetSerializedSize());
+diff -ruN a/qlaodv/model/qlaodv-packet.h b/qlaodv/model/qlaodv-packet.h
+--- a/qlaodv/model/qlaodv-packet.h	2026-10-06 13:11:35.439453713 +0000
++++ b/qlaodv/model/qlaodv-packet.h	2026-10-06 13:11:35.454218309 +0000
+@@ -503,6 +503,16 @@
+     uint32_t m_dstSeqNo;  ///< Destination Sequence Number
+     Ipv4Address m_origin; ///< Source IP Address
+     uint32_t m_lifeTime;  ///< Lifetime (in milliseconds)
++    // QL-AODV (Ateya et al. 2025, Sec. 3.1): RREP extended from 19 to 27 bytes
++    uint32_t m_totalBuffer{0}; ///< sum of per-node buffer occupancy (%) along the path
++    uint32_t m_maxBuffer{0};   ///< maximum per-node buffer occupancy (%) along the path
++
++  public:
++    /// QL-AODV accessors
++    void SetTotalBuffer(uint32_t v) { m_totalBuffer = v; }
++    uint32_t GetTotalBuffer() const { return m_totalBuffer; }
++    void SetMaxBuffer(uint32_t v) { m_maxBuffer = v; }
++    uint32_t GetMaxBuffer() const { return m_maxBuffer; }
+ };
+ 
+ /**
+diff -ruN a/qlaodv/model/qlaodv-routing-protocol.cc b/qlaodv/model/qlaodv-routing-protocol.cc
+--- a/qlaodv/model/qlaodv-routing-protocol.cc	2026-10-06 13:11:35.435390236 +0000
++++ b/qlaodv/model/qlaodv-routing-protocol.cc	2026-10-06 13:11:35.454328430 +0000
+@@ -18,6 +18,7 @@
+ 
+ #include "ns3/adhoc-wifi-mac.h"
+ #include "ns3/boolean.h"
++#include "ns3/double.h"
+ #include "ns3/inet-socket-address.h"
+ #include "ns3/log.h"
+ #include "ns3/pointer.h"
+@@ -31,6 +32,7 @@
+ #include "ns3/wifi-net-device.h"
+ 
+ #include <algorithm>
++#include <cmath>
+ #include <limits>
+ 
+ #undef NS_LOG_APPEND_CONTEXT
+@@ -182,6 +184,42 @@
+             .SetParent<Ipv4RoutingProtocol>()
+             .SetGroupName("Qlaodv")
+             .AddConstructor<RoutingProtocol>()
++            .AddAttribute("QlAlpha", "QL-AODV learning rate (Table 2: 0.2)",
++                          DoubleValue(0.2), MakeDoubleAccessor(&RoutingProtocol::m_qlAlpha),
++                          MakeDoubleChecker<double>(0.0, 1.0))
++            .AddAttribute("QlGamma", "QL-AODV discount factor (Table 2: 0.7)",
++                          DoubleValue(0.7), MakeDoubleAccessor(&RoutingProtocol::m_qlGamma),
++                          MakeDoubleChecker<double>(0.0, 1.0))
++            .AddAttribute("QlEpsilon0", "QL-AODV initial epsilon (Table 2: 0.5)",
++                          DoubleValue(0.5), MakeDoubleAccessor(&RoutingProtocol::m_qlEpsilon0),
++                          MakeDoubleChecker<double>(0.0, 1.0))
++            .AddAttribute("QlEpsilonMin", "QL-AODV minimum epsilon (Table 2: 0.1)",
++                          DoubleValue(0.1), MakeDoubleAccessor(&RoutingProtocol::m_qlEpsilonMin),
++                          MakeDoubleChecker<double>(0.0, 1.0))
++            .AddAttribute("QlEpsilonDecay", "QL-AODV epsilon decay per decision (Table 2: 0.995)",
++                          DoubleValue(0.995), MakeDoubleAccessor(&RoutingProtocol::m_qlEpsilonDecay),
++                          MakeDoubleChecker<double>(0.0, 1.0))
++            .AddAttribute("QlMaxRoutes", "QL-AODV maximum candidate routes (Table 2: 10)",
++                          UintegerValue(10), MakeUintegerAccessor(&RoutingProtocol::m_qlMaxRoutes),
++                          MakeUintegerChecker<uint32_t>(1))
++            .AddAttribute("QlRrepWait", "QL-AODV RREP collection window (Sec. 3.3: 300 ms)",
++                          TimeValue(MilliSeconds(300)), MakeTimeAccessor(&RoutingProtocol::m_qlRrepWait),
++                          MakeTimeChecker())
++            .AddAttribute("QlBufSampleInterval", "QL-AODV RequestQueue sampling period (reconstruction)",
++                          TimeValue(MilliSeconds(100)), MakeTimeAccessor(&RoutingProtocol::m_qlBufSample),
++                          MakeTimeChecker())
++            .AddAttribute("QlBufWindow", "QL-AODV sliding window for mean/max buffer (reconstruction)",
++                          TimeValue(Seconds(1)), MakeTimeAccessor(&RoutingProtocol::m_qlBufWindow),
++                          MakeTimeChecker())
++            .AddAttribute("QlFeedbackTimeout", "QL-AODV: no MAC outcome within this time = failure",
++                          TimeValue(Seconds(1)), MakeTimeAccessor(&RoutingProtocol::m_qlFbTimeout),
++                          MakeTimeChecker())
++            .AddAttribute("QlDuplicateReplies",
++                          "QL-AODV reconstruction: the destination also answers duplicate RREQs that "
++                          "arrive from new neighbours (up to QlMaxRoutes), so that several RREPs can "
++                          "reach the source during the collection window",
++                          BooleanValue(true), MakeBooleanAccessor(&RoutingProtocol::m_qlDupReply),
++                          MakeBooleanChecker())
+             .AddAttribute("HelloInterval",
+                           "HELLO messages emission interval.",
+                           TimeValue(Seconds(1)),
+@@ -352,6 +390,9 @@
+ void
+ RoutingProtocol::DoDispose()
+ {
++    m_bufSampleEvent.Cancel();
++    m_pendingEvent.Cancel();
++    for (auto& t : m_rrepTimer) t.second.Cancel();
+     m_ipv4 = nullptr;
+     for (auto iter = m_socketAddresses.begin(); iter != m_socketAddresses.end(); iter++)
+     {
+@@ -401,6 +442,10 @@
+ 
+     m_rerrRateLimitTimer.SetFunction(&RoutingProtocol::RerrRateLimitTimerExpire, this);
+     m_rerrRateLimitTimer.Schedule(Seconds(1));
++    // QL-AODV
++    m_ql_epsilon = m_qlEpsilon0;
++    m_bufSampleEvent = Simulator::Schedule(m_qlBufSample, &RoutingProtocol::QlSampleBuffer, this);
++    m_pendingEvent = Simulator::Schedule(MilliSeconds(250), &RoutingProtocol::QlPurgePending, this);
+ }
+ 
+ Ptr<Ipv4Route>
+@@ -440,6 +485,7 @@
+         }
+         UpdateRouteLifeTime(dst, m_activeRouteTimeout);
+         UpdateRouteLifeTime(route->GetGateway(), m_activeRouteTimeout);
++        QlRecordDecision(dst, p->GetUid());   // QL-AODV: feedback for the selected route
+         return route;
+     }
+ 
+@@ -783,15 +829,26 @@
+ 
+     mac->TraceConnectWithoutContext("DroppedMpdu",
+                                     MakeCallback(&RoutingProtocol::NotifyTxError, this));
++    mac->TraceConnectWithoutContext("AckedMpdu",
++                                    MakeCallback(&RoutingProtocol::NotifyTxAcked, this)); // QL-AODV
+ }
+ 
+ void
+ RoutingProtocol::NotifyTxError(WifiMacDropReason reason, Ptr<const WifiMpdu> mpdu)
+ {
++    if (!m_pendingFeedback.empty())
++        QlFeedback(mpdu->GetPacket()->GetUid(), -1.0);   // QL-AODV Eq. 5: failure
+     m_nb.GetTxErrorCallback()(mpdu->GetHeader());
+ }
+ 
+ void
++RoutingProtocol::NotifyTxAcked(Ptr<const WifiMpdu> mpdu)
++{
++    if (!m_pendingFeedback.empty())
++        QlFeedback(mpdu->GetPacket()->GetUid(), +1.0);   // QL-AODV Eq. 5: success
++}
++
++void
+ RoutingProtocol::NotifyInterfaceDown(uint32_t i)
+ {
+     NS_LOG_FUNCTION(this << m_ipv4->GetAddress(i, 0).GetLocal());
+@@ -1339,6 +1396,11 @@
+      */
+     if (m_rreqIdCache.IsDuplicate(origin, id))
+     {
++        // QL-AODV reconstruction: let the destination answer duplicates from new neighbours
++        if (m_qlDupReply && IsMyOwnAddress(rreqHeader.GetDst()))
++        {
++            QlReplyToDuplicate(rreqHeader, receiver, src);
++        }
+         NS_LOG_DEBUG("Ignoring RREQ due to duplicate");
+         return;
+     }
+@@ -1430,6 +1492,10 @@
+                           << static_cast<uint32_t>(rreqHeader.GetHopCount()) << " ID "
+                           << rreqHeader.GetId() << " to destination " << rreqHeader.GetDst());
+ 
++    if (IsMyOwnAddress(rreqHeader.GetDst()))
++    {
++        m_dupReplied[std::make_pair(origin, id)].insert(src);   // QL-AODV
++    }
+     //  A node generates a RREP if either:
+     //  (i)  it is itself the destination,
+     if (IsMyOwnAddress(rreqHeader.GetDst()))
+@@ -1537,6 +1603,8 @@
+                           /*dstSeqNo=*/m_seqNo,
+                           /*origin=*/toOrigin.GetDestination(),
+                           /*lifetime=*/m_myRouteTimeout);
++    rrepHeader.SetTotalBuffer(static_cast<uint32_t>(std::lround(QlBufMean())));   // QL-AODV
++    rrepHeader.SetMaxBuffer(static_cast<uint32_t>(std::lround(QlBufMax())));      // QL-AODV
+     Ptr<Packet> packet = Create<Packet>();
+     SocketIpTtlTag tag;
+     tag.SetTtl(toOrigin.GetHop());
+@@ -1561,6 +1629,8 @@
+                           /*dstSeqNo=*/toDst.GetSeqNo(),
+                           /*origin=*/toOrigin.GetDestination(),
+                           /*lifetime=*/toDst.GetLifeTime());
++    rrepHeader.SetTotalBuffer(static_cast<uint32_t>(std::lround(QlBufMean())));   // QL-AODV
++    rrepHeader.SetMaxBuffer(static_cast<uint32_t>(std::lround(QlBufMax())));      // QL-AODV
+     /* If the node we received a RREQ for is a neighbor we are
+      * probably facing a unidirectional link... Better request a RREP-ack
+      */
+@@ -1650,6 +1720,39 @@
+         return;
+     }
+ 
++    // ---- QL-AODV Algorithm 1: the source stores the RREP and waits m_rrepWaitTime ----
++    if (IsMyOwnAddress(rrepHeader.GetOrigin()))
++    {
++        RoutingTableEntry cur;
++        bool haveValid = m_routingTable.LookupValidRoute(dst, cur);
++        bool recent = m_lastSelection.count(dst) &&
++                      Simulator::Now() - m_lastSelection[dst] < 2 * m_qlRrepWait;
++        if (!(haveValid && recent && !m_rrepTimer[dst].IsPending()))
++        {
++            int32_t ifIdx = m_ipv4->GetInterfaceForAddress(receiver);
++            RrepEntry e;
++            e.nextHop = sender;
++            e.hop = hop;
++            e.seqNo = rrepHeader.GetDstSeqno();
++            e.totalBuf = rrepHeader.GetTotalBuffer();
++            e.maxBuf = rrepHeader.GetMaxBuffer();
++            e.lifeTime = rrepHeader.GetLifeTime();
++            e.dev = m_ipv4->GetNetDevice(ifIdx);
++            e.iface = m_ipv4->GetAddress(ifIdx, 0);
++            QlCollect(dst, e);
++        }
++        if (rrepHeader.GetAckRequired())
++        {
++            SendReplyAck(sender);
++        }
++        return;
++    }
++    // ---- QL-AODV: intermediate node aggregates its buffer statistics into the RREP ----
++    rrepHeader.SetTotalBuffer(rrepHeader.GetTotalBuffer() +
++                              static_cast<uint32_t>(std::lround(QlBufMean())));
++    rrepHeader.SetMaxBuffer(std::max(rrepHeader.GetMaxBuffer(),
++                                     static_cast<uint32_t>(std::lround(QlBufMax()))));
++
+     /*
+      * If the route table entry to the destination is created or updated, then the following actions
+      * occur:
+@@ -2033,6 +2136,7 @@
+         header.SetSource(route->GetSource());
+         header.SetTtl(header.GetTtl() +
+                       1); // compensate extra TTL decrement by fake loopback routing
++        QlRecordDecision(dst, p->GetUid());   // QL-AODV
+         ucb(route, p, header);
+     }
+ }
+@@ -2285,5 +2389,228 @@
+     Ipv4RoutingProtocol::DoInitialize();
+ }
+ 
++// ============================================================================
++// QL-AODV (Ateya et al., Future Internet 17(10):473, 2025) — reconstruction
++// ============================================================================
++void
++RoutingProtocol::QlSampleBuffer()
++{
++    // RequestQueue occupancy in percent of its capacity (Sec. 3.1)
++    double occ = (m_maxQueueLen > 0) ? 100.0 * m_queue.GetSize() / m_maxQueueLen : 0.0;
++    m_bufSamples.push_back(std::min(100.0, occ));
++    size_t n = std::max<size_t>(1, static_cast<size_t>(m_qlBufWindow.GetSeconds() /
++                                                       m_qlBufSample.GetSeconds() + 0.5));
++    while (m_bufSamples.size() > n) m_bufSamples.pop_front();
++    m_bufSampleEvent = Simulator::Schedule(m_qlBufSample, &RoutingProtocol::QlSampleBuffer, this);
++}
++
++double
++RoutingProtocol::QlBufMean() const
++{
++    if (m_bufSamples.empty()) return 0.0;
++    double s = 0.0;
++    for (double v : m_bufSamples) s += v;
++    return s / m_bufSamples.size();
++}
++
++double
++RoutingProtocol::QlBufMax() const
++{
++    double m = 0.0;
++    for (double v : m_bufSamples) m = std::max(m, v);
++    return m;
++}
++
++RoutingProtocol::QlState
++RoutingProtocol::QlMakeState(const RrepEntry& e) const
++{
++    // Eq. 2-4 with B_node_max% = 100 %; each component discretised in 0.1 steps (0..10)
++    double h = std::max<uint32_t>(1, e.hop);
++    double hn = std::min(1.0, h / m_qlHmax);
++    double bavg = std::min(1.0, (e.totalBuf / h) / 100.0);
++    double bmax = std::min(1.0, e.maxBuf / 100.0);
++    auto bin = [](double x) { return static_cast<uint32_t>(std::lround(x * 10.0)); };
++    return bin(hn) * 121 + bin(bavg) * 11 + bin(bmax);
++}
++
++double&
++RoutingProtocol::QlQ(Ipv4Address dst, QlState s, uint32_t a)
++{
++    auto& v = m_qTable[dst][s];
++    if (v.size() < m_qlMaxRoutes) v.resize(m_qlMaxRoutes, 0.0);   // Q initialised to 0
++    return v[a];
++}
++
++double
++RoutingProtocol::QlMaxNext(Ipv4Address dst)
++{
++    // max over the current candidate routes of D (Algorithm 3, step 2)
++    double best = 0.0;
++    bool any = false;
++    for (const auto& c : m_multiRoutes[dst])
++    {
++        double q = QlQ(dst, c.state, c.routeId);
++        if (!any || q > best) { best = q; any = true; }
++    }
++    return any ? best : 0.0;
++}
++
++void
++RoutingProtocol::QlCollect(Ipv4Address dst, const RrepEntry& e)
++{
++    m_rrepBuffer[dst].push_back(e);
++    if (!m_rrepTimer[dst].IsPending())
++    {
++        m_rrepTimer[dst] = Simulator::Schedule(m_qlRrepWait,
++                                               &RoutingProtocol::QlProcessCollectedRreps, this, dst);
++    }
++}
++
++void
++RoutingProtocol::QlProcessCollectedRreps(Ipv4Address dst)
++{
++    auto& buf = m_rrepBuffer[dst];
++    if (buf.empty()) return;
++    // Algorithm 2: sort by hop count, keep the best MAX_ROUTES, compute states
++    std::stable_sort(buf.begin(), buf.end(),
++                     [](const RrepEntry& a, const RrepEntry& b) { return a.hop < b.hop; });
++    std::vector<Candidate> cands;
++    for (uint32_t i = 0; i < buf.size() && i < m_qlMaxRoutes; ++i)
++    {
++        Candidate c;
++        c.state = QlMakeState(buf[i]);
++        c.routeId = i;
++        c.rrep = buf[i];
++        QlQ(dst, c.state, c.routeId);   // initialise if absent
++        cands.push_back(c);
++    }
++    m_multiRoutes[dst] = cands;
++    // epsilon-greedy
++    size_t pick = 0;
++    if (m_uniformRandomVariable->GetValue(0.0, 1.0) < m_ql_epsilon)
++    {
++        pick = static_cast<size_t>(m_uniformRandomVariable->GetInteger(0, cands.size() - 1));
++    }
++    else
++    {
++        double best = -1e300;
++        for (size_t i = 0; i < cands.size(); ++i)
++        {
++            double q = QlQ(dst, cands[i].state, cands[i].routeId);
++            if (q > best) { best = q; pick = i; }
++        }
++    }
++    m_ql_epsilon = std::max(m_qlEpsilonMin, m_ql_epsilon * m_qlEpsilonDecay);
++    const Candidate& sel = cands[pick];
++    m_selected[dst] = sel;
++    m_lastSelection[dst] = Simulator::Now();
++    m_qlStats.selections++;
++    m_qlStats.candidatesSum += cands.size();
++    // install the selected route in the main routing table
++    RoutingTableEntry newEntry(/*dev=*/sel.rrep.dev,
++                               /*dst=*/dst,
++                               /*vSeqNo=*/true,
++                               /*seqNo=*/sel.rrep.seqNo,
++                               /*iface=*/sel.rrep.iface,
++                               /*hops=*/sel.rrep.hop,
++                               /*nextHop=*/sel.rrep.nextHop,
++                               /*lifetime=*/sel.rrep.lifeTime);
++    RoutingTableEntry existing;
++    if (m_routingTable.LookupRoute(dst, existing))
++    {
++        newEntry.SetFlag(VALID);
++        m_routingTable.Update(newEntry);
++    }
++    else
++    {
++        m_routingTable.AddRoute(newEntry);
++    }
++    auto t = m_addressReqTimer.find(dst);
++    if (t != m_addressReqTimer.end())
++    {
++        t->second.Cancel();
++        m_addressReqTimer.erase(t);
++    }
++    buf.clear();
++    RoutingTableEntry toDst;
++    if (m_routingTable.LookupValidRoute(dst, toDst))
++    {
++        SendPacketFromQueue(dst, toDst.GetRoute());
++    }
++}
++
++void
++RoutingProtocol::QlRecordDecision(Ipv4Address dst, uint64_t uid)
++{
++    auto it = m_selected.find(dst);
++    if (it == m_selected.end()) return;
++    m_pendingFeedback[uid] = PendingFb{dst, it->second.state, it->second.routeId, Simulator::Now()};
++}
++
++void
++RoutingProtocol::QlFeedback(uint64_t uid, double reward)
++{
++    auto it = m_pendingFeedback.find(uid);
++    if (it == m_pendingFeedback.end()) return;
++    const PendingFb pf = it->second;
++    m_pendingFeedback.erase(it);
++    // Algorithm 3 / Eq. 6
++    double& q = QlQ(pf.dst, pf.state, pf.action);
++    double maxNext = QlMaxNext(pf.dst);
++    q = q + m_qlAlpha * (reward + m_qlGamma * maxNext - q);
++    if (reward > 0) m_qlStats.fbAck++; else m_qlStats.fbFail++;
++}
++
++void
++RoutingProtocol::QlPurgePending()
++{
++    Time now = Simulator::Now();
++    std::vector<uint64_t> expired;
++    for (const auto& kv : m_pendingFeedback)
++        if (now - kv.second.t0 > m_qlFbTimeout) expired.push_back(kv.first);
++    for (uint64_t uid : expired)
++    {
++        m_qlStats.fbTimeout++;
++        QlFeedback(uid, -1.0);   // "no ACK within a specified timeout" = failure
++    }
++    m_pendingEvent = Simulator::Schedule(MilliSeconds(250), &RoutingProtocol::QlPurgePending, this);
++}
++
++void
++RoutingProtocol::QlReplyToDuplicate(const RreqHeader& rreq, Ipv4Address receiver, Ipv4Address src)
++{
++    auto& done = m_dupReplied[std::make_pair(rreq.GetOrigin(), rreq.GetId())];
++    if (done.count(src) || done.size() >= m_qlMaxRoutes) return;
++    done.insert(src);
++    int32_t ifIdx = m_ipv4->GetInterfaceForAddress(receiver);
++    // make sure the neighbour is in the routing table (the duplicate skipped that step)
++    RoutingTableEntry toNeighbor;
++    if (!m_routingTable.LookupRoute(src, toNeighbor))
++    {
++        RoutingTableEntry e(m_ipv4->GetNetDevice(ifIdx), src, false, rreq.GetOriginSeqno(),
++                            m_ipv4->GetAddress(ifIdx, 0), 1, src, m_activeRouteTimeout);
++        m_routingTable.AddRoute(e);
++    }
++    RrepHeader rrepHeader(/*prefixSize=*/0,
++                          /*hopCount=*/0,
++                          /*dst=*/rreq.GetDst(),
++                          /*dstSeqNo=*/m_seqNo,
++                          /*origin=*/rreq.GetOrigin(),
++                          /*lifetime=*/m_myRouteTimeout);
++    rrepHeader.SetTotalBuffer(static_cast<uint32_t>(std::lround(QlBufMean())));
++    rrepHeader.SetMaxBuffer(static_cast<uint32_t>(std::lround(QlBufMax())));
++    Ptr<Packet> packet = Create<Packet>();
++    SocketIpTtlTag tag;
++    tag.SetTtl(rreq.GetHopCount() + 1);
++    packet->AddPacketTag(tag);
++    packet->AddHeader(rrepHeader);
++    TypeHeader tHeader(QLAODVTYPE_RREP);
++    packet->AddHeader(tHeader);
++    Ptr<Socket> socket = FindSocketWithInterfaceAddress(m_ipv4->GetAddress(ifIdx, 0));
++    if (!socket) return;
++    socket->SendTo(packet, 0, InetSocketAddress(src, QLAODV_PORT));
++    m_qlStats.dupReplies++;
++}
++
+ } // namespace qlaodv
+ } // namespace ns3
+diff -ruN a/qlaodv/model/qlaodv-routing-protocol.h b/qlaodv/model/qlaodv-routing-protocol.h
+--- a/qlaodv/model/qlaodv-routing-protocol.h	2026-10-06 13:11:35.441659785 +0000
++++ b/qlaodv/model/qlaodv-routing-protocol.h	2026-10-06 13:11:35.454497054 +0000
+@@ -26,10 +26,15 @@
+ #include "ns3/ipv4-l3-protocol.h"
+ #include "ns3/ipv4-routing-protocol.h"
+ #include "ns3/node.h"
++#include "ns3/event-id.h"
+ #include "ns3/output-stream-wrapper.h"
+ #include "ns3/random-variable-stream.h"
+ 
+ #include <map>
++#include <deque>
++#include <set>
++#include <unordered_map>
++#include <vector>
+ 
+ namespace ns3
+ {
+@@ -204,6 +209,88 @@
+      */
+     void NotifyTxError(WifiMacDropReason reason, Ptr<const WifiMpdu> mpdu);
+ 
++    // =================== QL-AODV (Ateya et al., Future Internet 2025) ===================
++  public:
++    struct QlStats
++    {
++        uint64_t selections{0};     ///< route selections (one per processed RREP collection)
++        uint64_t candidatesSum{0};  ///< sum of candidate routes over all selections
++        uint64_t fbAck{0};
++        uint64_t fbFail{0};
++        uint64_t fbTimeout{0};
++        uint64_t dupReplies{0};     ///< RREPs sent by the destination for duplicate RREQs
++    };
++    const QlStats& GetQlStats() const { return m_qlStats; }
++
++  private:
++    /// one RREP stored at the source during the collection window (Algorithm 1)
++    struct RrepEntry
++    {
++        Ipv4Address nextHop;
++        uint8_t hop;
++        uint32_t seqNo;
++        uint32_t totalBuf;
++        uint32_t maxBuf;
++        Time lifeTime;
++        Ptr<NetDevice> dev;
++        Ipv4InterfaceAddress iface;
++    };
++    /// discretised state s = (h_norm, b_avg_norm, b_max_norm), 0.1 bins (Eq. 1-4)
++    typedef uint32_t QlState;
++    struct Candidate
++    {
++        QlState state;
++        uint32_t routeId;   ///< action index (rank in the hop-count-sorted RREP list)
++        RrepEntry rrep;
++    };
++    struct PendingFb
++    {
++        Ipv4Address dst;
++        QlState state;
++        uint32_t action;
++        Time t0;
++    };
++    std::map<Ipv4Address, std::vector<RrepEntry>> m_rrepBuffer;   ///< m_rrepBuffer[D]
++    std::map<Ipv4Address, EventId> m_rrepTimer;                    ///< collection timers
++    std::map<Ipv4Address, std::vector<Candidate>> m_multiRoutes;  ///< m_multiRoutes[D]
++    std::map<Ipv4Address, Candidate> m_selected;                   ///< installed choice per D
++    std::map<Ipv4Address, Time> m_lastSelection;
++    std::map<Ipv4Address, std::map<QlState, std::vector<double>>> m_qTable;
++    std::unordered_map<uint64_t, PendingFb> m_pendingFeedback;    ///< by packet UID
++    std::map<std::pair<Ipv4Address, uint32_t>, std::set<Ipv4Address>> m_dupReplied;
++    std::deque<double> m_bufSamples;                               ///< RequestQueue occupancy (%)
++    EventId m_bufSampleEvent;
++    EventId m_pendingEvent;
++    double m_ql_epsilon{0.5};
++    QlStats m_qlStats;
++    // parameters (Table 2 of the paper unless stated otherwise)
++    double m_qlAlpha{0.2};
++    double m_qlGamma{0.7};
++    double m_qlEpsilon0{0.5};
++    double m_qlEpsilonMin{0.1};
++    double m_qlEpsilonDecay{0.995};
++    uint32_t m_qlMaxRoutes{10};
++    double m_qlHmax{10.0};
++    Time m_qlRrepWait{MilliSeconds(300)};
++    Time m_qlBufSample{MilliSeconds(100)};   ///< reconstruction choice (not given in paper)
++    Time m_qlBufWindow{Seconds(1)};          ///< reconstruction choice (not given in paper)
++    Time m_qlFbTimeout{Seconds(1)};          ///< "no ACK within a specified timeout" -> failure
++    bool m_qlDupReply{true};                 ///< destination answers duplicate RREQs (see docs)
++
++    void QlSampleBuffer();
++    double QlBufMean() const;
++    double QlBufMax() const;
++    QlState QlMakeState(const RrepEntry& e) const;
++    double& QlQ(Ipv4Address dst, QlState s, uint32_t a);
++    double QlMaxNext(Ipv4Address dst);
++    void QlCollect(Ipv4Address dst, const RrepEntry& e);
++    void QlProcessCollectedRreps(Ipv4Address dst);
++    void QlRecordDecision(Ipv4Address dst, uint64_t uid);
++    void QlFeedback(uint64_t uid, double reward);
++    void QlPurgePending();
++    void NotifyTxAcked(Ptr<const WifiMpdu> mpdu);
++    void QlReplyToDuplicate(const RreqHeader& rreq, Ipv4Address receiver, Ipv4Address src);
++
+     // Protocol parameters.
+     uint32_t m_rreqRetries; ///< Maximum number of retransmissions of RREQ with TTL = NetDiameter to
+                             ///< discover a route

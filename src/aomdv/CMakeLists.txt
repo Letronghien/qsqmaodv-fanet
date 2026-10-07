@@ -1,16 +1,25 @@
 build_lib(
   LIBNAME aomdv
   SOURCE_FILES
-    model/aomdv-packet.cc
-    model/aomdv-rtable.cc
-    model/aomdv-routing-protocol.cc
     helper/aomdv-helper.cc
+    model/aomdv-dpd.cc
+    model/aomdv-id-cache.cc
+    model/aomdv-neighbor.cc
+    model/aomdv-packet.cc
+    model/aomdv-routing-protocol.cc
+    model/aomdv-rqueue.cc
+    model/aomdv-rtable.cc
   HEADER_FILES
-    model/aomdv-packet.h
-    model/aomdv-rtable.h
-    model/aomdv-routing-protocol.h
     helper/aomdv-helper.h
+    model/aomdv-dpd.h
+    model/aomdv-id-cache.h
+    model/aomdv-neighbor.h
+    model/aomdv-packet.h
+    model/aomdv-routing-protocol.h
+    model/aomdv-rqueue.h
+    model/aomdv-rtable.h
   LIBRARIES_TO_LINK
-    ${libinternet}
+    ${libapplications}
+    ${libinternet-apps}
     ${libwifi}
 )

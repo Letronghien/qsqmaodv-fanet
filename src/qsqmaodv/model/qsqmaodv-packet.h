@@ -15,17 +15,17 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  * Based on
- *      NS-2 SAQSQMAODV model developed by the CMU/MONARCH group and optimized and
+ *      NS-2 AODV model developed by the CMU/MONARCH group and optimized and
  *      tuned by Samir Das and Mahesh Marina, University of Cincinnati;
  *
- *      SAQSQMAODV-UU implementation by Erik Nordström of Uppsala University
- *      https://web.archive.org/web/20100527072022/http://core.it.uu.se/core/index.php/SAQSQMAODV-UU
+ *      AODV-UU implementation by Erik Nordström of Uppsala University
+ *      https://web.archive.org/web/20100527072022/http://core.it.uu.se/core/index.php/AODV-UU
  *
  * Authors: Elena Buchatskaia <borovkovaes@iitp.ru>
  *          Pavel Boyko <boyko@iitp.ru>
  */
-#ifndef SAQSQMAODVPACKET_H
-#define SAQSQMAODVPACKET_H
+#ifndef QSQMAODVPACKET_H
+#define QSQMAODVPACKET_H
 
 #include "ns3/enum.h"
 #include "ns3/header.h"
@@ -41,29 +41,29 @@ namespace qsqmaodv
 {
 
 /**
- * \ingroup saqsqmaodv
+ * \ingroup qsqmaodv
  * \brief MessageType enumeration
  */
 enum MessageType
 {
-    SAQSQMAODVTYPE_RREQ = 1,    //!< SAQSQMAODVTYPE_RREQ
-    SAQSQMAODVTYPE_RREP = 2,    //!< SAQSQMAODVTYPE_RREP
-    SAQSQMAODVTYPE_RERR = 3,    //!< SAQSQMAODVTYPE_RERR
-    SAQSQMAODVTYPE_RREP_ACK = 4 //!< SAQSQMAODVTYPE_RREP_ACK
+    QSQMAODVTYPE_RREQ = 1,    //!< QSQMAODVTYPE_RREQ
+    QSQMAODVTYPE_RREP = 2,    //!< QSQMAODVTYPE_RREP
+    QSQMAODVTYPE_RERR = 3,    //!< QSQMAODVTYPE_RERR
+    QSQMAODVTYPE_RREP_ACK = 4 //!< QSQMAODVTYPE_RREP_ACK
 };
 
 /**
- * \ingroup saqsqmaodv
- * \brief SAQSQMAODV types
+ * \ingroup qsqmaodv
+ * \brief QSQMAODV types
  */
 class TypeHeader : public Header
 {
   public:
     /**
      * constructor
-     * \param t the SAQSQMAODV RREQ type
+     * \param t the QSQMAODV RREQ type
      */
-    TypeHeader(MessageType t = SAQSQMAODVTYPE_RREQ);
+    TypeHeader(MessageType t = QSQMAODVTYPE_RREQ);
 
     /**
      * \brief Get the type ID.
@@ -114,7 +114,7 @@ class TypeHeader : public Header
 std::ostream& operator<<(std::ostream& os, const TypeHeader& h);
 
 /**
-* \ingroup saqsqmaodv
+* \ingroup qsqmaodv
 * \brief   Route Request (RREQ) Message Format
   \verbatim
   0                   1                   2                   3
@@ -336,7 +336,7 @@ class RreqHeader : public Header
 std::ostream& operator<<(std::ostream& os, const RreqHeader&);
 
 /**
-* \ingroup saqsqmaodv
+* \ingroup qsqmaodv
 * \brief Route Reply (RREP) Message Format
   \verbatim
   0                   1                   2                   3
@@ -524,7 +524,7 @@ class RrepHeader : public Header
 std::ostream& operator<<(std::ostream& os, const RrepHeader&);
 
 /**
-* \ingroup saqsqmaodv
+* \ingroup qsqmaodv
 * \brief Route Reply Acknowledgment (RREP-ACK) Message Format
   \verbatim
   0                   1
@@ -570,7 +570,7 @@ class RrepAckHeader : public Header
 std::ostream& operator<<(std::ostream& os, const RrepAckHeader&);
 
 /**
-* \ingroup saqsqmaodv
+* \ingroup qsqmaodv
 * \brief Route Error (RERR) Message Format
   \verbatim
   0                   1                   2                   3
@@ -667,4 +667,4 @@ std::ostream& operator<<(std::ostream& os, const RerrHeader&);
 } // namespace qsqmaodv
 } // namespace ns3
 
-#endif /* SAQSQMAODVPACKET_H */
+#endif /* QSQMAODVPACKET_H */
